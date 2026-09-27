@@ -194,8 +194,7 @@ func TestCommandsThroughFollower(t *testing.T) {
 	}
 }
 
-// TestPipelineOrder mixes reads and writes in one pipeline; each read must
-// see exactly the writes before it.
+// TestPipelineOrder checks that each read in a pipeline sees exactly the writes before it.
 func TestPipelineOrder(t *testing.T) {
 	c := newTestCluster(t)
 	for _, node := range []int{c.leader(), (c.leader() + 1) % 3} {

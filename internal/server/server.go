@@ -1,7 +1,4 @@
-// Package server is the Redis-facing side of a QuorumDB node. It parses
-// RESP commands, answers local ones itself, and routes the rest: on the
-// leader, writes go through Raft and reads through ReadIndex; on a follower,
-// they are forwarded to the leader.
+// Package server serves Redis clients and routes their commands through Raft on the leader.
 package server
 
 import (
@@ -33,14 +30,12 @@ type Config struct {
 	RaftAddr  string            // peer listen address
 	Peers     map[string]string // member ID -> peer address, for all members
 	DataDir   string
-	// Raft carries timing and snapshot settings; ID, Peers, DataDir and
-	// Logger are filled in from the fields above.
+	// Raft holds timing and snapshot settings; ID, Peers, DataDir and Logger are filled in by New.
 	Raft           raft.Config
 	CommandTimeout time.Duration
 	Logger         *slog.Logger
 
-	// Deliberately unsafe modes, used only as negative controls for the
-	// chaos test (it must detect the violations they cause).
+	// Unsafe modes, only used as negative controls to show the chaos test catches violations.
 	UnsafeLocalReads bool // serve reads from local state on any node, skipping ReadIndex
 	UnsafeEarlyAck   bool // acknowledge SET as soon as the leader appends it, before commit
 }
@@ -64,8 +59,7 @@ type Server struct {
 	wg     sync.WaitGroup
 }
 
-// New starts a node: it recovers Raft state from disk, starts the peer
-// listener and then the client listener.
+// New recovers Raft state, starts the peer listener and then the client listener.
 func New(cfg Config) (*Server, error) {
 	if cfg.CommandTimeout == 0 {
 		cfg.CommandTimeout = 5 * time.Second
@@ -133,8 +127,7 @@ func (s *Server) Addr() net.Addr { return s.ln.Addr() }
 // Raft exposes the consensus module (used by tests).
 func (s *Server) Raft() *raft.Raft { return s.raft }
 
-// Close stops accepting clients, closes open connections, and shuts down
-// Raft, which flushes the log.
+// Close stops the listeners and connections, then shuts down Raft, which flushes the log.
 func (s *Server) Close() {
 	s.mu.Lock()
 	if s.closed {
@@ -180,8 +173,7 @@ func (s *Server) acceptLoop() {
 	}
 }
 
-// handleConn serves one client. Commands that are already buffered (a
-// pipelined burst) are executed as one batch and answered with one write.
+// handleConn serves one client, executing each burst of pipelined commands as one batch.
 func (s *Server) handleConn(conn net.Conn) {
 	defer func() {
 		conn.Close()
@@ -227,9 +219,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 }
 
-// execBatch answers a batch of commands in order. Local commands and
-// argument errors are handled here; everything else is routed to the leader
-// as one group.
+// execBatch answers commands in order: local ones here, the rest routed to the leader together.
 func (s *Server) execBatch(batch [][][]byte) (replies [][]byte, quit bool) {
 	s.commands.Add(uint64(len(batch)))
 	replies = make([][]byte, len(batch))
@@ -260,9 +250,7 @@ func (s *Server) execBatch(batch [][][]byte) (replies [][]byte, quit bool) {
 	return replies, false
 }
 
-// route executes commands on the leader: directly if this node leads,
-// otherwise by forwarding. A request is only retried when it provably was
-// not executed (or is read-only), so a write is never applied twice.
+// route runs commands on the leader, directly or by forwarding, retrying only if provably not executed.
 func (s *Server) route(cmds [][][]byte, readOnly bool) [][]byte {
 	if readOnly && s.cfg.UnsafeLocalReads {
 		now := time.Now().UnixMilli()
@@ -322,10 +310,7 @@ func (s *Server) HandleForward(cmds [][][]byte) ([][]byte, error) {
 	return s.execLeader(ctx, cmds)
 }
 
-// execLeader runs routed commands on the leader, preserving their order:
-// consecutive writes are proposed together, consecutive reads share one
-// ReadIndex round, and each group waits for the previous one. It returns
-// ErrNotLeader only if nothing was executed.
+// execLeader runs commands in order, batching consecutive writes and consecutive reads.
 func (s *Server) execLeader(ctx context.Context, cmds [][][]byte) ([][]byte, error) {
 	out := make([][]byte, len(cmds))
 	for i := 0; i < len(cmds); {
@@ -357,8 +342,7 @@ func (s *Server) execLeader(ctx context.Context, cmds [][][]byte) ([][]byte, err
 	return out, nil
 }
 
-// execWrites proposes a group of writes and waits for each to be committed
-// by a majority and applied. The reply is the state machine's result.
+// execWrites proposes writes and waits for each to be committed by a majority and applied.
 func (s *Server) execWrites(ctx context.Context, cmds [][][]byte, out [][]byte) error {
 	now := time.Now().UnixMilli()
 	data := make([][]byte, 0, len(cmds))
@@ -394,8 +378,7 @@ func (s *Server) execWrites(ctx context.Context, cmds [][][]byte, out [][]byte) 
 	return nil
 }
 
-// execReads confirms leadership with ReadIndex, waits until the state
-// machine has caught up to the read index, then reads locally.
+// execReads confirms leadership with ReadIndex, waits for that index to apply, then reads locally.
 func (s *Server) execReads(ctx context.Context, cmds [][][]byte, out [][]byte) error {
 	idx, err := s.raft.ReadIndex(ctx)
 	if err != nil {
@@ -433,9 +416,7 @@ func fill(n int, reply []byte) [][]byte {
 	return out
 }
 
-// expireLoop has the leader propose a sweep when keys have expired, so
-// expired keys are eventually removed from memory on every replica. Reads
-// already hide expired keys; this only reclaims memory.
+// expireLoop has the leader propose a sweep so expired keys are freed on every replica.
 func (s *Server) expireLoop() {
 	defer s.wg.Done()
 	t := time.NewTicker(time.Second)

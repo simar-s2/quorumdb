@@ -1,7 +1,4 @@
-# Three-node QuorumDB cluster. Clients can talk to any node:
-#   redis-cli -p 6379   (n1)
-#   redis-cli -p 6380   (n2)
-#   redis-cli -p 6381   (n3)
+# Three-node QuorumDB cluster; clients can use any node: n1 on 6379, n2 on 6380, n3 on 6381.
 name: quorumdb
 
 x-node: &node

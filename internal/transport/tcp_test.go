@@ -101,8 +101,7 @@ func TestDialFailureIsNotSent(t *testing.T) {
 	}
 }
 
-// A call that hangs is abandoned at its deadline and the connection is
-// replaced, so later calls work once the peer responds again.
+// A hung call is abandoned at its deadline and the connection replaced, so later calls work.
 func TestTimeoutRecyclesConnection(t *testing.T) {
 	h := &fakeHandler{block: make(chan struct{})}
 	c := pair(t, h)

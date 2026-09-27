@@ -1,7 +1,4 @@
-// Package transport carries traffic between cluster members: Raft RPCs and
-// client commands forwarded from followers to the leader. It uses Go's
-// net/rpc with gob encoding over long-lived TCP connections; each connection
-// multiplexes concurrent calls.
+// Package transport carries Raft RPCs and forwarded client commands over net/rpc and TCP.
 package transport
 
 import (
@@ -19,8 +16,7 @@ import (
 
 const dialTimeout = time.Second
 
-// ErrNotSent means the request never left this node (the dial failed), so
-// retrying it cannot execute it twice.
+// ErrNotSent means the dial failed, so the request never left and retrying is safe.
 var ErrNotSent = errors.New("transport: request not sent")
 
 // RaftHandler receives Raft RPCs; *raft.Raft implements it.
@@ -30,9 +26,7 @@ type RaftHandler interface {
 	HandleInstallSnapshot(*raft.InstallSnapshotArgs) *raft.InstallSnapshotReply
 }
 
-// ForwardHandler executes client commands forwarded by a follower. It
-// returns one encoded RESP reply per command, or raft.ErrNotLeader if it
-// executed nothing because it is not the leader.
+// ForwardHandler executes forwarded commands, or returns raft.ErrNotLeader having executed nothing.
 type ForwardHandler interface {
 	HandleForward(cmds [][][]byte) ([][]byte, error)
 }
@@ -40,8 +34,7 @@ type ForwardHandler interface {
 type ForwardArgs struct{ Commands [][][]byte }
 type ForwardReply struct{ Replies [][]byte }
 
-// Raft RPCs and forwarded commands use separate connections, so a slow
-// client request never delays heartbeats.
+// Raft RPCs and forwarded commands use separate connections so client load cannot delay heartbeats.
 type channel uint8
 
 const (
@@ -71,8 +64,7 @@ type TCP struct {
 	inbound map[net.Conn]struct{}
 }
 
-// Listen opens the listener for peer traffic. peers maps member IDs to their
-// addresses.
+// Listen opens the peer listener; peers maps member IDs to addresses.
 func Listen(addr string, peers map[string]string, logger *slog.Logger) (*TCP, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -183,9 +175,7 @@ func (t *TCP) client(ctx context.Context, peer string, ch channel) (*rpc.Client,
 	return pc.client, nil
 }
 
-// drop discards a connection after a failure so the next call redials. This
-// is also how a silently dropped (blackholed) connection is recovered: the
-// call times out, the connection is closed, and a new one is made.
+// drop discards a failed connection so the next call redials, which also recovers blackholed links.
 func (t *TCP) drop(peer string, ch channel, c *rpc.Client) {
 	t.mu.Lock()
 	pc := t.pools[poolKey{peer, ch}]
@@ -245,9 +235,7 @@ func (t *TCP) InstallSnapshot(ctx context.Context, peer string, args *raft.Insta
 	return &reply, nil
 }
 
-// Forward sends client commands to the leader. A raft.ErrNotLeader or
-// ErrNotSent error means nothing was executed; any other error leaves the
-// outcome unknown.
+// Forward sends commands to the leader; ErrNotLeader or ErrNotSent mean nothing was executed.
 func (t *TCP) Forward(ctx context.Context, leader string, cmds [][][]byte) ([][]byte, error) {
 	var reply ForwardReply
 	err := t.call(ctx, leader, chanForward, "KV.Forward", &ForwardArgs{Commands: cmds}, &reply)

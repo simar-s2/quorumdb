@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Runs redis-benchmark from a container on the cluster's Docker network (so
-# Docker Desktop's port forwarding is not part of the measurement) against the
-# current leader, or a follower with TARGET=follower.
+# Runs redis-benchmark from a container on the cluster network against the leader (or TARGET=follower).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

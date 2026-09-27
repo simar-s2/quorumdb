@@ -14,27 +14,7 @@ import (
 	"sync/atomic"
 )
 
-// The write-ahead log is a directory of segment files named <seq>.wal. Each
-// file is a sequence of records:
-//
-//	| crc32c(payload) uint32 | len(payload) uint32 | payload |
-//
-// The first record of a segment is a header {seq, startIndex}, where
-// startIndex is the last log index at the moment the segment was created.
-// Every other record is one log entry {index, term, type, data}.
-//
-// Truncation is implicit. When a follower replaces a conflicting suffix, the
-// new entries are appended with indexes lower than the previous record, and
-// replay applies the rule "an entry at index i replaces everything from i
-// onwards". Replaying the records in order therefore rebuilds the in-memory
-// log exactly, with no separate truncate operation to get wrong.
-//
-// Compaction works in whole segments. A snapshot at index S records walStart,
-// the first segment needed to rebuild the log after S. Any segment whose
-// startIndex is <= S qualifies: everything after S was appended after that
-// segment was created. Older segments are deleted once the snapshot is
-// durable. The WAL is rotated after every snapshot so the next snapshot can
-// drop the current segment.
+// The WAL is segment files of CRC-framed records; on replay an entry at index i replaces everything from i.
 
 const (
 	recHeader byte = 1
@@ -62,11 +42,9 @@ type wal struct {
 	f      *os.File
 	segs   []segmentInfo // ordered by seq; the last one is open for appends
 	buf    []byte        // encoded records not yet written to f
-	// written counts append calls. A caller that wants its records durable
-	// remembers the count its append returned and passes it to syncTo.
+	// written counts append calls; callers pass the returned count to syncTo.
 	written uint64
-	// lastIdx is the index of the last entry written, which always equals
-	// the last index of the in-memory log.
+	// lastIdx is the index of the last entry written, which equals the in-memory log's last index.
 	lastIdx uint64
 	synced  atomic.Uint64
 }
@@ -75,9 +53,7 @@ func segPath(dir string, seq uint64) string {
 	return filepath.Join(dir, fmt.Sprintf("%016d.wal", seq))
 }
 
-// openWAL replays segments from walStart onwards and returns the entries
-// after snapIndex. A torn record at the end of the last segment (a crash in
-// the middle of a write) is cut off; damage anywhere else is an error.
+// openWAL replays segments from walStart, returns entries after snapIndex and cuts a torn tail.
 func openWAL(dir string, sync bool, walStart, snapIndex uint64) (*wal, []Entry, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, nil, err
@@ -112,8 +88,7 @@ func openWAL(dir string, sync bool, walStart, snapIndex uint64) (*wal, []Entry, 
 	}
 	w.lastIdx = snapIndex + uint64(len(tail))
 
-	// Always continue in a fresh segment so that only the newest segment can
-	// ever contain a torn write.
+	// Always continue in a fresh segment so only the newest segment can hold a torn write.
 	next := walStart
 	if len(w.segs) > 0 && w.segs[len(w.segs)-1].seq >= next {
 		next = w.segs[len(w.segs)-1].seq + 1
@@ -183,8 +158,7 @@ func replaySegment(path string, seq uint64, isLast bool, snapIndex uint64, tail 
 				Data:  append([]byte(nil), payload[18:]...),
 			}
 			if e.Index <= snapIndex {
-				// Everything after this index was replaced, including
-				// whatever followed the snapshot point.
+				// A record at or below the snapshot index replaced everything after the snapshot point.
 				*tail = (*tail)[:0]
 				break
 			}
@@ -201,8 +175,7 @@ func replaySegment(path string, seq uint64, isLast bool, snapIndex uint64, tail 
 	return info, haveHeader, nil
 }
 
-// decodeRecord returns the payload and total size of the record at the start
-// of b, or n == 0 if the record is incomplete or fails its checksum.
+// decodeRecord returns the payload and size of the first record, or n == 0 if it is torn or corrupt.
 func decodeRecord(b []byte) (payload []byte, n int) {
 	if len(b) < recHeaderSize {
 		return nil, 0
@@ -247,9 +220,7 @@ func appendHeaderRecord(b []byte, seq, start uint64) []byte {
 	})
 }
 
-// append buffers records for ents and returns a sequence number to pass to
-// syncTo. It only copies bytes; the caller holds the Raft lock, so it must be
-// cheap.
+// append buffers records and returns a sequence number for syncTo; it only copies bytes.
 func (w *wal) append(ents []Entry) (uint64, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -287,9 +258,7 @@ func (w *wal) flushLocked() error {
 	return err
 }
 
-// syncTo makes every record from append calls up to seq durable. Concurrent
-// callers share fsyncs: whoever gets syncMu flushes everything buffered so
-// far, so one fsync can acknowledge many writers (group commit).
+// syncTo makes appends up to seq durable; one fsync covers every waiting writer (group commit).
 func (w *wal) syncTo(seq uint64) error {
 	if w.synced.Load() >= seq {
 		return nil
@@ -315,13 +284,10 @@ func (w *wal) syncTo(seq uint64) error {
 	return nil
 }
 
-// rotate seals the current segment and starts a new one whose startIndex is
-// the current last index. It returns the new segment's sequence number.
+// rotate seals the current segment and starts one whose startIndex is the current last index.
 func (w *wal) rotate() (uint64, error) { return w.rotateTo(false, 0) }
 
-// reset starts a new segment for a log that was replaced wholesale by a
-// snapshot at index. Replay from that segment begins with an empty log after
-// index, so none of the discarded entries can come back.
+// reset starts a new segment after the whole log was replaced by a snapshot at index.
 func (w *wal) reset(index uint64) (uint64, error) { return w.rotateTo(true, index) }
 
 func (w *wal) rotateTo(reset bool, index uint64) (uint64, error) {
@@ -372,8 +338,7 @@ func (w *wal) createSegmentLocked(seq, start uint64) error {
 	return nil
 }
 
-// pickStart returns the newest segment that is enough, together with a
-// snapshot at snapIndex, to rebuild the log.
+// pickStart returns the newest segment that, with a snapshot at snapIndex, can rebuild the log.
 func (w *wal) pickStart(snapIndex uint64) uint64 {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -385,8 +350,7 @@ func (w *wal) pickStart(snapIndex uint64) uint64 {
 	return w.segs[0].seq
 }
 
-// removeBefore deletes segments older than seq. Only call it once a snapshot
-// with walStart >= seq is durable.
+// removeBefore deletes segments older than seq, once a snapshot with walStart >= seq is durable.
 func (w *wal) removeBefore(seq uint64) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -445,8 +409,7 @@ func truncateFile(path string, size int64, sync bool) error {
 	return nil
 }
 
-// syncDir makes a create, rename or delete in dir durable. Errors are
-// ignored because not every platform supports fsync on a directory.
+// syncDir fsyncs a directory so creates, renames and deletes are durable (errors are ignored).
 func syncDir(dir string) {
 	if d, err := os.Open(dir); err == nil {
 		d.Sync()

@@ -135,8 +135,7 @@ func TestWALCompactionWithSnapshot(t *testing.T) {
 	}
 }
 
-// A record at or below the snapshot index means the suffix after the
-// snapshot was replaced; replay must not resurrect it.
+// Replay must not resurrect entries replaced by a record at or below the snapshot index.
 func TestWALTruncationBelowSnapshotPoint(t *testing.T) {
 	dir := t.TempDir()
 	w, _, _ := openWAL(dir, true, 0, 0)

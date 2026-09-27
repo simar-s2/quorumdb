@@ -1,10 +1,4 @@
-// Package kv is the replicated state machine: an in-memory string key-value
-// store whose mutations arrive as Raft log entries.
-//
-// Every mutation is encoded as a Command by the leader and applied in log
-// order on every node. Commands carry the leader's clock reading (Now) and
-// absolute expiry times, so applying the same log produces the same state on
-// every replica regardless of local clocks.
+// Package kv is the replicated key-value state machine fed by the Raft log.
 package kv
 
 import (
@@ -44,8 +38,7 @@ type Command struct {
 
 var errCorrupt = errors.New("kv: corrupt command encoding")
 
-// Encode serializes the command as:
-// op | flags | varint now | varint expireAt | varint delta | uvarint nargs | (uvarint len | bytes)*
+// Encode serializes the command into a compact varint-based format.
 func (c *Command) Encode() []byte {
 	n := 2 + 4*binary.MaxVarintLen64
 	for _, a := range c.Args {
@@ -64,8 +57,7 @@ func (c *Command) Encode() []byte {
 	return b
 }
 
-// DecodeCommand parses an encoded command. Args alias b, which is fine
-// because log entry data is never modified after it is created.
+// DecodeCommand parses an encoded command; Args alias b, which is never modified.
 func DecodeCommand(b []byte) (*Command, error) {
 	if len(b) < 2 {
 		return nil, errCorrupt

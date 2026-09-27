@@ -1,6 +1,4 @@
-// Package resp implements the parts of the Redis serialization protocol
-// (RESP2) that QuorumDB needs: parsing client commands, encoding replies,
-// and parsing replies on the client side (used by tests and the chaos tool).
+// Package resp implements RESP2: command parsing, reply encoding and reply parsing.
 package resp
 
 import (
@@ -18,8 +16,7 @@ const (
 	readerBufLen = 64 << 10
 )
 
-// ErrProtocol is returned for malformed input. The server replies with an
-// error and closes the connection, like Redis does.
+// ErrProtocol is returned for malformed input; the server replies with an error and closes.
 var ErrProtocol = errors.New("protocol error")
 
 func protoErr(format string, args ...any) error {
@@ -35,13 +32,10 @@ func NewReader(r io.Reader) *Reader {
 	return &Reader{br: bufio.NewReaderSize(r, readerBufLen)}
 }
 
-// Buffered returns the number of bytes that can be parsed without blocking.
-// The server uses it to collect pipelined commands into one batch.
+// Buffered returns how many bytes can be parsed without blocking, used to batch pipelined commands.
 func (r *Reader) Buffered() int { return r.br.Buffered() }
 
-// ReadCommand reads one client command. Clients normally send an array of
-// bulk strings; plain "inline" commands (as typed into telnet) are also
-// accepted. Empty commands are skipped.
+// ReadCommand reads one command, as a RESP array or an inline command, skipping empty ones.
 func (r *Reader) ReadCommand() ([][]byte, error) {
 	for {
 		line, err := r.readLine()
@@ -101,8 +95,7 @@ func (r *Reader) readBulk(n int) ([]byte, error) {
 	return buf[:n:n], nil
 }
 
-// readLine returns a line without its trailing CRLF. The slice is only valid
-// until the next read.
+// readLine returns a line without its CRLF; the slice is valid until the next read.
 func (r *Reader) readLine() ([]byte, error) {
 	line, err := r.br.ReadSlice('\n')
 	if err == bufio.ErrBufferFull {
@@ -129,8 +122,7 @@ func parseInt(b []byte) (int64, error) {
 	return strconv.ParseInt(string(b), 10, 64)
 }
 
-// Reply encoding. Everything appends to a caller-owned buffer so a batch of
-// pipelined replies can be written with a single syscall.
+// Reply encoding appends to a caller-owned buffer so a batch of replies needs one write.
 
 func AppendSimple(b []byte, s string) []byte {
 	b = append(b, '+')

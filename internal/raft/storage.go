@@ -9,14 +9,7 @@ import (
 	"path/filepath"
 )
 
-// storage owns a node's data directory:
-//
-//	meta      current term and vote (Figure 2's persistent state)
-//	snapshot  latest state machine snapshot plus its index, term and walStart
-//	wal/      log segments, see wal.go
-//
-// meta and snapshot are replaced atomically: write a temp file, fsync it,
-// rename it over the old one, fsync the directory.
+// storage owns a node's data directory: meta (term and vote), snapshot, and wal/ segments.
 type storage struct {
 	dir  string
 	sync bool

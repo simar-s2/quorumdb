@@ -32,8 +32,7 @@ func TestModelAcceptsLinearizableHistory(t *testing.T) {
 	}
 }
 
-// The property the chaos test exists to protect: an acknowledged write must
-// be visible to every later read.
+// An acknowledged write must be visible to every later read.
 func TestModelDetectsLostAcknowledgedWrite(t *testing.T) {
 	h := &hist{}
 	h.add(0, 0, 10, Input{Op: OpSet, Key: "x", Value: "a"}, Output{})
@@ -62,8 +61,7 @@ func TestModelDetectsDoubleIncrement(t *testing.T) {
 	}
 }
 
-// An unacknowledged write may or may not have happened; both outcomes are
-// linearizable, but later reads must be consistent with a single choice.
+// An ambiguous write may or may not apply, but later reads must agree on one outcome.
 func TestModelAmbiguousWrites(t *testing.T) {
 	end := int64(math.MaxInt32)
 	took := &hist{}

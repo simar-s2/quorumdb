@@ -1,7 +1,4 @@
 // Command quorumdb runs one node of a QuorumDB cluster.
-//
-//	quorumdb -id n1 -redis-addr :6379 -raft-addr :7000 \
-//	    -peers n1=n1:7000,n2=n2:7000,n3=n3:7000 -data /data
 package main
 
 import (

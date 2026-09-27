@@ -1,8 +1,6 @@
 package raft
 
-// memLog is the in-memory copy of the log. ents[0] is a sentinel that holds
-// the index and term of the last entry covered by the snapshot (0/0 when
-// there is none), so the entry at index i lives at ents[i-snapIndex].
+// memLog is the in-memory log; ents[0] is a sentinel holding the snapshot's last index and term.
 type memLog struct {
 	ents []Entry
 }
@@ -18,8 +16,7 @@ func (l *memLog) snapTerm() uint64  { return l.ents[0].Term }
 func (l *memLog) lastIndex() uint64 { return l.ents[len(l.ents)-1].Index }
 func (l *memLog) lastTerm() uint64  { return l.ents[len(l.ents)-1].Term }
 
-// term returns the term of entry i. It works for the snapshot's last index
-// too; ok is false if i is compacted away or beyond the end of the log.
+// term returns the term of entry i (including the snapshot index); ok is false if unavailable.
 func (l *memLog) term(i uint64) (uint64, bool) {
 	if i < l.snapIndex() || i > l.lastIndex() {
 		return 0, false
@@ -27,9 +24,7 @@ func (l *memLog) term(i uint64) (uint64, bool) {
 	return l.ents[i-l.snapIndex()].Term, true
 }
 
-// slice returns a copy of entries in [lo, hi). The copy matters: the caller
-// uses it after releasing the lock, while the log may be truncated and
-// overwritten in place.
+// slice returns a copy of entries in [lo, hi), safe to use after releasing the lock.
 func (l *memLog) slice(lo, hi uint64) []Entry {
 	if lo <= l.snapIndex() || hi > l.lastIndex()+1 || lo >= hi {
 		return nil
@@ -48,8 +43,7 @@ func (l *memLog) truncateFrom(i uint64) {
 
 func (l *memLog) append(es ...Entry) { l.ents = append(l.ents, es...) }
 
-// compact discards entries up to and including index i, which becomes the new
-// sentinel. If i is past the end of the log the whole log is discarded.
+// compact drops entries up to and including i, which becomes the new sentinel.
 func (l *memLog) compact(i, term uint64) {
 	var rest []Entry
 	if i < l.lastIndex() {
@@ -59,8 +53,7 @@ func (l *memLog) compact(i, term uint64) {
 	l.ents = nl.ents
 }
 
-// lastIndexOfTerm returns the highest index holding an entry of the given
-// term, or 0 if the log has none.
+// lastIndexOfTerm returns the highest index with the given term, or 0.
 func (l *memLog) lastIndexOfTerm(term uint64) uint64 {
 	for k := len(l.ents) - 1; k > 0; k-- {
 		switch t := l.ents[k].Term; {
@@ -73,8 +66,7 @@ func (l *memLog) lastIndexOfTerm(term uint64) uint64 {
 	return 0
 }
 
-// firstIndexOfTerm returns the first index of the run of entries with the
-// same term as entry i, scanning back no further than the snapshot.
+// firstIndexOfTerm returns the first index of the run of entries with entry i's term.
 func (l *memLog) firstIndexOfTerm(i uint64) uint64 {
 	t, ok := l.term(i)
 	if !ok {

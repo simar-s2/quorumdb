@@ -15,14 +15,11 @@ import (
 type class uint8
 
 const (
-	// classLocal commands are answered by the node the client is connected
-	// to, without touching the replicated state (PING, INFO, ...).
+	// classLocal commands are answered by the connected node without touching replicated state.
 	classLocal class = iota
-	// classRead commands read the state machine on the leader after a
-	// ReadIndex round, which makes them linearizable.
+	// classRead commands read the leader's state machine after a ReadIndex round.
 	classRead
-	// classWrite commands become Raft log entries and are acknowledged once
-	// a majority has committed them.
+	// classWrite commands become log entries, acknowledged once a majority has committed them.
 	classWrite
 )
 
@@ -32,9 +29,7 @@ type command struct {
 	class class
 	local func(s *Server, b []byte, args [][]byte) []byte
 	read  func(s *Server, b []byte, args [][]byte, now int64) []byte
-	// write validates arguments and builds the state machine command. It
-	// returns an error reply instead for invalid input, which is then never
-	// proposed.
+	// write validates arguments and builds the state machine command, or returns an error reply.
 	write func(args [][]byte, now int64) (*kv.Command, []byte)
 }
 
@@ -74,8 +69,7 @@ func init() {
 	register(&command{name: "pexpire", arity: -3, class: classWrite, write: cmdExpire(time.Millisecond)})
 }
 
-// lookup finds the command for args and checks its arity. On failure it
-// returns the error reply to send.
+// lookup finds the command for args and checks its arity, returning an error reply on failure.
 func lookup(args [][]byte) (*command, []byte) {
 	name := strings.ToLower(string(args[0]))
 	c, ok := commands[name]
@@ -133,8 +127,7 @@ func cmdSelect(_ *Server, b []byte, args [][]byte) []byte {
 	return resp.AppendSimple(b, "OK")
 }
 
-// cmdConfig answers CONFIG GET for the parameters redis-benchmark asks about
-// at startup, so it runs without warnings.
+// cmdConfig answers the CONFIG GET calls redis-benchmark makes at startup.
 func cmdConfig(_ *Server, b []byte, args [][]byte) []byte {
 	if !eq(args[1], "get") || len(args) != 3 {
 		return resp.AppendError(b, "ERR CONFIG subcommand not supported (only CONFIG GET)")
@@ -194,9 +187,7 @@ func cmdTTL(millis bool) func(*Server, []byte, [][]byte, int64) []byte {
 
 // Writes.
 
-// cmdSet parses SET key value [NX|XX] [EX s|PX ms|EXAT ts|PXAT ms-ts|KEEPTTL].
-// Relative expiries are turned into absolute times here, on the leader, so
-// every replica applies the same deadline.
+// cmdSet parses SET options and turns relative expiries into absolute times on the leader.
 func cmdSet(args [][]byte, now int64) (*kv.Command, []byte) {
 	c := &kv.Command{Op: kv.OpSet, Now: now, Args: args[1:3]}
 	haveExpiry := false

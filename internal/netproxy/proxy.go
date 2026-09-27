@@ -1,7 +1,4 @@
-// Package netproxy is a TCP proxy for fault injection. The chaos harness puts
-// one proxy on every directed link between nodes (a -> b), so it can cut or
-// blackhole individual links, isolate a node, or create partial partitions,
-// without root privileges or iptables.
+// Package netproxy is a TCP proxy the chaos test uses to cut or blackhole links between nodes.
 package netproxy
 
 import (
@@ -16,13 +13,9 @@ type Mode int32
 const (
 	// Pass forwards traffic normally.
 	Pass Mode = iota
-	// Reset closes existing connections and refuses new ones, like a
-	// firewall answering with TCP RST: the sender fails fast.
+	// Reset closes connections and refuses new ones, like a TCP RST.
 	Reset
-	// Drop silently discards all traffic, like a firewall dropping
-	// packets: the sender only notices through timeouts. Connections that
-	// were blackholed stay dead after the link heals, as a real TCP
-	// connection would after a long outage; new connections work again.
+	// Drop silently discards traffic; blackholed connections stay dead after the link heals.
 	Drop
 )
 
@@ -159,8 +152,7 @@ func (p *Proxy) handle(c net.Conn) {
 	go func() { copyUnless(pr, c, pr.upstream); done() }()
 }
 
-// copyUnless copies src to dst, discarding data while the pair is
-// blackholed.
+// copyUnless copies src to dst, discarding data while the pair is blackholed.
 func copyUnless(pr *pair, dst, src net.Conn) {
 	buf := make([]byte, 32<<10)
 	for {

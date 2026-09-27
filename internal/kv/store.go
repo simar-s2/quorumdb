@@ -29,8 +29,7 @@ type item struct {
 
 func (it item) expired(now int64) bool { return it.exp != 0 && it.exp <= now }
 
-// Store is the key-value state machine. Apply is called by the Raft applier
-// goroutine only; reads may run concurrently from client goroutines.
+// Store is the key-value state machine; only the Raft applier calls Apply.
 type Store struct {
 	mu   sync.RWMutex
 	data map[string]item
@@ -41,8 +40,7 @@ func NewStore() *Store {
 	return &Store{data: make(map[string]item), ttl: make(map[string]struct{})}
 }
 
-// Apply executes one committed command and returns its reply value: Status,
-// nil (null reply), int64 or error.
+// Apply executes one committed command and returns its reply (Status, nil, int64 or error).
 func (s *Store) Apply(_ uint64, data []byte) any {
 	cmd, err := DecodeCommand(data)
 	if err != nil {
@@ -128,8 +126,7 @@ func (s *Store) Apply(_ uint64, data []byte) any {
 	return errors.New("ERR unknown state machine operation")
 }
 
-// expireAllowed implements the NX/XX/GT/LT options of EXPIRE. A key with no
-// expiry counts as an infinite TTL, as in Redis.
+// expireAllowed implements EXPIRE's NX/XX/GT/LT options; no expiry counts as infinite.
 func expireAllowed(flags uint8, cur, next int64) bool {
 	switch {
 	case flags&FlagNX != 0:
@@ -144,8 +141,7 @@ func expireAllowed(flags uint8, cur, next int64) bool {
 	return true
 }
 
-// lookup returns the live item for key. Expired items are removed, which is
-// deterministic because now comes from the log entry. Callers hold s.mu.
+// lookup returns the live item for key, deleting it if expired (caller holds s.mu).
 func (s *Store) lookup(key string, now int64) (item, bool) {
 	it, ok := s.data[key]
 	if !ok {
@@ -185,7 +181,6 @@ func (s *Store) Get(key []byte, now int64) ([]byte, bool) {
 }
 
 // MGet reads all keys under one lock so the result is a consistent snapshot.
-// Missing keys are returned as nil.
 func (s *Store) MGet(keys [][]byte, now int64) [][]byte {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -210,8 +205,7 @@ func (s *Store) Exists(keys [][]byte, now int64) int64 {
 	return n
 }
 
-// PTTL returns the remaining time to live in milliseconds, -1 if the key has
-// no expiry and -2 if it does not exist.
+// PTTL returns the remaining TTL in ms, -1 if the key has no expiry, -2 if it is missing.
 func (s *Store) PTTL(key []byte, now int64) int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -226,16 +220,14 @@ func (s *Store) PTTL(key []byte, now int64) int64 {
 	}
 }
 
-// Len returns the number of stored keys, including expired keys that have
-// not been swept yet (same as Redis DBSIZE).
+// Len returns the key count, including expired keys not yet swept (like DBSIZE).
 func (s *Store) Len() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.data)
 }
 
-// HasExpired reports whether any key is past its expiry, so the leader knows
-// when a sweep is worth proposing.
+// HasExpired reports whether any key is past its expiry, so the leader can propose a sweep.
 func (s *Store) HasExpired(now int64) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -258,10 +250,7 @@ func (s *Store) sortedKeys() []string {
 
 const snapshotVersion = 1
 
-// Snapshot takes a shallow copy of the map, which is a consistent point-in-
-// time view because stored values are never modified in place (Apply always
-// replaces an item). The returned function encodes that copy as:
-// version | uvarint count | (uvarint klen | key | uvarint vlen | value | varint exp)*
+// Snapshot shallow-copies the map (values are immutable) and returns a function that encodes it.
 func (s *Store) Snapshot() func() ([]byte, error) {
 	s.mu.RLock()
 	data := maps.Clone(s.data)
@@ -319,8 +308,7 @@ func (s *Store) Restore(b []byte) error {
 	return nil
 }
 
-// Digest hashes the full state. Replicas that applied the same log prefix
-// have the same digest; the chaos harness uses this to check convergence.
+// Digest hashes the full state so replicas can be compared.
 func (s *Store) Digest() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -337,8 +325,7 @@ func (s *Store) Digest() string {
 	return hex.EncodeToString(h.Sum(nil)[:20])
 }
 
-// parseInt accepts the same strict integer syntax as Redis: an optional
-// minus sign, no leading zeros or plus sign, and a value that fits in int64.
+// parseInt accepts Redis' strict integer syntax: optional minus, no leading zeros, fits in int64.
 func parseInt(b []byte) (int64, bool) {
 	if len(b) == 0 || len(b) > 20 {
 		return 0, false
@@ -362,6 +349,5 @@ func parseInt(b []byte) (int64, bool) {
 	return n, err == nil
 }
 
-// ParseInt is exported for the command layer, which validates arguments the
-// same way the state machine does.
+// ParseInt exposes parseInt to the command layer.
 func ParseInt(b []byte) (int64, bool) { return parseInt(b) }

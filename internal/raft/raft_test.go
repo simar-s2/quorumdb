@@ -9,8 +9,7 @@ import (
 	"time"
 )
 
-// ---------------------------------------------------------------------------
-// Leader election
+// --- Leader election ---
 
 func TestInitialElection(t *testing.T) {
 	c := newCluster(t, 3)
@@ -55,9 +54,7 @@ func TestReElection(t *testing.T) {
 	c.checkOneLeader()
 }
 
-// TestSplitVote forces all three nodes to become candidates in the same term
-// at the same moment. Each votes for itself, so no one can win that term;
-// randomized timeouts must break the tie in a later term.
+// TestSplitVote makes every node a candidate in the same term; a later term must break the tie.
 func TestSplitVote(t *testing.T) {
 	c := newCluster(t, 3)
 	c.checkOneLeader()
@@ -100,8 +97,7 @@ func TestSplitVote(t *testing.T) {
 	}
 }
 
-// TestVoteRules exercises the RequestVote receiver directly: one vote per
-// term, the up-to-date check, and that votes survive a restart.
+// TestVoteRules checks one vote per term, the up-to-date rule, and votes persisted across restarts.
 func TestVoteRules(t *testing.T) {
 	dir := t.TempDir()
 	open := func() *Raft {
@@ -160,9 +156,7 @@ func TestVoteRules(t *testing.T) {
 	}
 }
 
-// TestPreVoteNoDisruption isolates a follower for many election timeouts.
-// Pre-vote keeps it from inflating its term, so rejoining does not depose the
-// leader.
+// TestPreVoteNoDisruption checks an isolated follower cannot inflate its term and depose the leader.
 func TestPreVoteNoDisruption(t *testing.T) {
 	c := newCluster(t, 3)
 	l := c.checkOneLeader()
@@ -184,8 +178,7 @@ func TestPreVoteNoDisruption(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Log replication
+// --- Log replication ---
 
 func TestBasicReplication(t *testing.T) {
 	c := newCluster(t, 3)
@@ -255,10 +248,7 @@ func TestNoCommitWithoutMajority(t *testing.T) {
 	c.checkErrors()
 }
 
-// TestLeaderLogConflict partitions a leader, lets it accept entries it can
-// never commit, and elects a new leader that commits different entries at
-// the same indexes. When the old leader returns, its conflicting entries
-// must be overwritten everywhere.
+// TestLeaderLogConflict checks that a partitioned leader's uncommitted entries get overwritten.
 func TestLeaderLogConflict(t *testing.T) {
 	c := newCluster(t, 3)
 	c.one("base", 3)
@@ -296,9 +286,7 @@ func TestLeaderLogConflict(t *testing.T) {
 	c.checkErrors()
 }
 
-// TestBackup is a stress test of log backtracking: leaders are repeatedly
-// cut off with long uncommitted tails, so followers need many conflicting
-// entries replaced.
+// TestBackup stresses log backtracking with long divergent tails from repeated partitions.
 func TestBackup(t *testing.T) {
 	c := newCluster(t, 5)
 	c.one("start", 5)
@@ -422,8 +410,7 @@ func TestFollowerAppendRules(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Persistence and restarts
+// --- Persistence and restarts ---
 
 func TestRestartAll(t *testing.T) {
 	c := newCluster(t, 3)
@@ -500,8 +487,7 @@ func TestCrashDuringWrites(t *testing.T) {
 	c.checkErrors()
 }
 
-// ---------------------------------------------------------------------------
-// Snapshots and compaction
+// --- Snapshots and compaction ---
 
 func withSnapshots(threshold uint64) func(*Config) {
 	return func(c *Config) { c.SnapshotThreshold = threshold }
@@ -530,8 +516,7 @@ func TestSnapshotCompactsLog(t *testing.T) {
 	c.checkErrors()
 }
 
-// TestInstallSnapshot lets a follower fall far behind a compacted leader, so
-// it can only catch up through InstallSnapshot.
+// TestInstallSnapshot makes a follower lag behind a compacted leader so only InstallSnapshot helps.
 func TestInstallSnapshot(t *testing.T) {
 	c := newCluster(t, 3, withSnapshots(20))
 	c.one("start", 3)
@@ -556,8 +541,7 @@ func TestInstallSnapshot(t *testing.T) {
 	if v, ok := c.fsms[lag].get(last); !ok || v != "while-down-99" {
 		t.Fatalf("lagging node has %q at %d", v, last)
 	}
-	// And it keeps working normally afterwards, including after a restart
-	// that must reload the installed snapshot.
+	// It keeps working afterwards, including after a restart that reloads the installed snapshot.
 	c.one("after", 3)
 	c.restart(lag)
 	idx := c.one("after-restart", 3)
@@ -590,11 +574,9 @@ func TestRestartFromSnapshot(t *testing.T) {
 	c.checkErrors()
 }
 
-// ---------------------------------------------------------------------------
-// Linearizable reads
+// --- Linearizable reads ---
 
-// TestReadIndexStaleLeader checks that a leader cut off from the majority
-// cannot confirm a read, even before it notices it has been replaced.
+// TestReadIndexStaleLeader checks that an isolated leader cannot confirm a read.
 func TestReadIndexStaleLeader(t *testing.T) {
 	c := newCluster(t, 3)
 	c.one("x", 3)
@@ -631,12 +613,9 @@ func TestReadIndexStaleLeader(t *testing.T) {
 	c.connect(l)
 }
 
-// ---------------------------------------------------------------------------
-// Everything at once
+// --- Everything at once ---
 
-// TestChurn combines an unreliable network, partitions, crashes and
-// snapshots while clients keep proposing, then checks that every node
-// applied the same values.
+// TestChurn mixes an unreliable network, partitions, crashes and snapshots, then checks agreement.
 func TestChurn(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow")

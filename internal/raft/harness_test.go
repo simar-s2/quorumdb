@@ -18,9 +18,7 @@ import (
 	"time"
 )
 
-// This file is the test harness: an in-memory network that can partition
-// nodes, cut single links and drop or delay messages, plus a cluster helper
-// that checks safety properties on every step.
+// Test harness: an in-memory network that can partition, cut links and drop messages, plus safety checks.
 
 var errUnreachable = errors.New("test network: unreachable")
 
@@ -46,8 +44,7 @@ type memTransport struct {
 	from string
 }
 
-// deliver runs call on the target node if the network allows it, and drops
-// the reply if the return path is broken.
+// deliver runs call on the target if the network allows it and drops the reply on a broken return path.
 func deliver[T any](t *memTransport, ctx context.Context, to string, call func(*Raft) T) (T, error) {
 	var zero T
 	n := t.net
@@ -251,8 +248,7 @@ func (c *cluster) crash(i int) {
 	}
 }
 
-// node and fsm return the current instance for slot i (nil while crashed).
-// Workers use them because crash and start swap the slots concurrently.
+// node and fsm return slot i's current instance (nil while crashed).
 func (c *cluster) node(i int) *Raft {
 	c.net.mu.Lock()
 	defer c.net.mu.Unlock()
@@ -307,8 +303,7 @@ func (c *cluster) fail(format string, args ...any) {
 	c.errs = append(c.errs, fmt.Sprintf(format, args...))
 }
 
-// recordApply checks State Machine Safety: no two nodes (or two lives of one
-// node) ever apply different values at the same index.
+// recordApply checks state machine safety: one value per index across all nodes and restarts.
 func (c *cluster) recordApply(id string, index uint64, v string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -329,8 +324,7 @@ func (c *cluster) checkErrors() {
 	c.errs = nil
 }
 
-// checkOneLeader waits for exactly one leader among connected nodes and
-// returns its position.
+// checkOneLeader waits for exactly one leader among connected nodes and returns it.
 func (c *cluster) checkOneLeader() int {
 	c.t.Helper()
 	for try := 0; try < 50; try++ {
@@ -385,8 +379,7 @@ func (c *cluster) checkTermsAgree() uint64 {
 	return term
 }
 
-// nCommitted returns how many running nodes have applied index, and the
-// value, checking that they agree.
+// nCommitted returns how many running nodes applied index, checking that they agree.
 func (c *cluster) nCommitted(index uint64) (int, string) {
 	count, val := 0, ""
 	for i := range c.fsms {
@@ -418,9 +411,7 @@ func (c *cluster) propose(i int, cmd string) (*Future, error) {
 	return futs[0], nil
 }
 
-// one submits cmd to whichever node is leader and waits until at least
-// expected nodes have applied it. It retries across leader changes, like a
-// client would, and returns the entry's index.
+// one submits cmd through the leader, retrying like a client, until expected nodes apply it.
 func (c *cluster) one(cmd string, expected int) uint64 {
 	c.t.Helper()
 	deadline := time.Now().Add(10 * time.Second)

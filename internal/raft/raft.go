@@ -14,23 +14,14 @@ import (
 
 const maxApplyBatch = 1024
 
-// snapshotTimeout bounds an InstallSnapshot RPC: a base allowance plus one
-// second per MiB. A fixed long timeout would let a silently dropped
-// connection stall replication to that follower long after the network
-// heals.
+// snapshotTimeout allows 2s plus 1s per MiB so a dead connection cannot stall replication.
 func snapshotTimeout(size int) time.Duration {
 	return 2*time.Second + time.Duration(size>>20)*time.Second
 }
 
 var errStepDown = errors.New("raft: no longer leader for this term")
 
-// Raft is one member of a cluster. All state below mu is guarded by mu; the
-// long-running goroutines are:
-//
-//	ticker     election timeouts, and check-quorum while leader
-//	applier    applies committed entries to the FSM and takes snapshots
-//	persister  fsyncs the leader's own log so it can count itself
-//	replicate  one per follower while leader: AppendEntries/InstallSnapshot
+// Raft is one cluster member; mu guards all fields below it.
 type Raft struct {
 	cfg    Config
 	id     string
@@ -43,8 +34,7 @@ type Raft struct {
 
 	mu sync.Mutex
 
-	// Persistent state (Figure 2). Saved to disk before answering any RPC
-	// that depends on it.
+	// Persistent state (Figure 2), saved before answering any RPC that depends on it.
 	currentTerm uint64
 	votedFor    string
 	log         *memLog
@@ -94,8 +84,7 @@ type Future struct {
 	err   error
 }
 
-// Wait blocks until the entry is applied and returns the FSM's result. An
-// error other than ErrNotLeader means the outcome is unknown.
+// Wait returns the FSM result once applied; errors other than ErrNotLeader mean the outcome is unknown.
 func (f *Future) Wait(ctx context.Context) (any, error) {
 	select {
 	case <-f.done:
@@ -163,8 +152,7 @@ func (r *Raft) Start() {
 	go r.runPersister()
 }
 
-// Shutdown stops the node and closes its storage. Pending proposals fail
-// with ErrShutdown.
+// Shutdown stops the node and closes storage; pending proposals fail with ErrShutdown.
 func (r *Raft) Shutdown() {
 	r.mu.Lock()
 	if r.shutdown {
@@ -196,9 +184,7 @@ func (r *Raft) isShutdown() bool {
 	return r.shutdown
 }
 
-// storageFailed crashes the node. If the disk cannot be written, the node
-// can no longer keep the promises it made to the cluster, so continuing
-// would be unsafe.
+// storageFailed crashes the node: without a working disk it cannot keep its promises.
 func (r *Raft) storageFailed(err error) {
 	r.logger.Error("raft: storage failure", "err", err)
 	panic(fmt.Sprintf("raft %s: storage failure: %v", r.id, err))
@@ -220,8 +206,7 @@ func (r *Raft) resetElectionTimer() {
 
 func (r *Raft) rpcTimeout() time.Duration { return r.cfg.ElectionTimeout }
 
-// ---------------------------------------------------------------------------
-// Elections
+// --- Elections ---
 
 func (r *Raft) runTicker() {
 	defer r.wg.Done()
@@ -252,9 +237,7 @@ func (r *Raft) tick(now time.Time) {
 	}
 }
 
-// checkQuorum makes a leader that has not heard from a majority for a whole
-// election timeout step down (thesis 6.2). A leader cut off in a minority
-// partition then stops accepting requests it could never commit.
+// checkQuorum steps down a leader that has not heard from a majority for an election timeout.
 func (r *Raft) checkQuorum(now time.Time) {
 	active := 1
 	for _, p := range r.peers {
@@ -270,11 +253,6 @@ func (r *Raft) checkQuorum(now time.Time) {
 }
 
 // campaign starts a pre-vote (pre=true) or a real election.
-//
-// Pre-vote (thesis 9.6): before incrementing its term, a node asks whether a
-// majority would vote for it. Nodes that still hear from a leader say no, so
-// a node returning from a partition cannot force a healthy leader to step
-// down by showing up with an inflated term.
 func (r *Raft) campaign(pre bool) {
 	r.resetElectionTimer()
 	r.leaderID = ""
@@ -339,8 +317,7 @@ func (r *Raft) campaign(pre bool) {
 	}
 }
 
-// HandleRequestVote implements the RequestVote receiver (Figure 2) plus the
-// pre-vote variant.
+// HandleRequestVote implements the RequestVote receiver (Figure 2) and pre-vote.
 func (r *Raft) HandleRequestVote(args *RequestVoteArgs) *RequestVoteReply {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -348,9 +325,7 @@ func (r *Raft) HandleRequestVote(args *RequestVoteArgs) *RequestVoteReply {
 	if r.shutdown || args.Term < r.currentTerm {
 		return reply
 	}
-	// Election restriction (5.4.1): only vote for a candidate whose log is
-	// at least as up to date as ours, so every leader holds every committed
-	// entry.
+	// Election restriction (5.4.1): only vote for candidates whose log is at least as up to date.
 	upToDate := args.LastLogTerm > r.log.lastTerm() ||
 		args.LastLogTerm == r.log.lastTerm() && args.LastLogIndex >= r.log.lastIndex()
 
@@ -373,17 +348,14 @@ func (r *Raft) HandleRequestVote(args *RequestVoteArgs) *RequestVoteReply {
 		r.resetElectionTimer()
 	}
 	if dirty {
-		// Term and vote must be durable before the vote leaves this node,
-		// otherwise a restart could let us vote twice in one term.
+		// Persist term and vote before replying, so a restart cannot vote twice in one term.
 		r.persistMeta()
 	}
 	reply.Term = r.currentTerm
 	return reply
 }
 
-// becomeFollower adopts term if it is newer (clearing the vote) and steps
-// down from leadership. persist=false lets a caller batch the metadata write
-// with a vote.
+// becomeFollower adopts a newer term, clears the vote and steps down from leadership.
 func (r *Raft) becomeFollower(term uint64, leader string, persist bool) {
 	if term > r.currentTerm {
 		r.currentTerm = term
@@ -433,20 +405,15 @@ func (r *Raft) becomeLeader() {
 		r.wg.Add(1)
 		go r.replicate(ctx, p, r.currentTerm, r.replCh[p])
 	}
-	// A new leader does not know which earlier-term entries are committed
-	// and may not commit them by counting replicas (Figure 8). Committing a
-	// no-op from its own term settles that.
+	// Commit a no-op from this term so entries from earlier terms become committed (Figure 8).
 	noop := Entry{Index: last + 1, Term: r.currentTerm, Type: EntryNoop}
 	r.noopIndex = noop.Index
 	r.appendLocal([]Entry{noop})
 }
 
-// ---------------------------------------------------------------------------
-// Log replication, leader side
+// --- Log replication, leader side ---
 
-// appendLocal appends entries to the leader's log and WAL buffer. The fsync
-// happens in the persister, in parallel with sending the entries to
-// followers (thesis 10.2.1).
+// appendLocal appends to the leader's log and WAL buffer; the persister fsyncs in parallel.
 func (r *Raft) appendLocal(ents []Entry) {
 	r.log.append(ents...)
 	if _, err := r.store.wal.append(ents); err != nil {
@@ -469,8 +436,7 @@ func (r *Raft) triggerReplication() {
 	}
 }
 
-// runPersister fsyncs the leader's log. Only then does the leader count
-// itself toward a majority. One fsync covers everything written so far.
+// runPersister fsyncs the leader's log; the leader counts itself toward a majority only after that.
 func (r *Raft) runPersister() {
 	defer r.wg.Done()
 	for {
@@ -504,9 +470,7 @@ func (r *Raft) runPersister() {
 	}
 }
 
-// replicate drives one follower: it sends whatever the follower is missing,
-// or an empty heartbeat when idle. It keeps a single RPC in flight; entries
-// that arrive meanwhile go out together in the next batch.
+// replicate keeps one follower up to date, one RPC in flight, batching entries that arrive meanwhile.
 func (r *Raft) replicate(ctx context.Context, peer string, term uint64, trigger <-chan struct{}) {
 	defer r.wg.Done()
 	timer := time.NewTimer(0)
@@ -542,8 +506,7 @@ func (r *Raft) replicate(ctx context.Context, peer string, term uint64, trigger 
 	}
 }
 
-// replicateOnce sends one AppendEntries (or InstallSnapshot) to peer. It
-// reports whether the peer still has entries to catch up on.
+// replicateOnce sends one AppendEntries or InstallSnapshot and reports whether more is pending.
 func (r *Raft) replicateOnce(ctx context.Context, peer string, term uint64) (bool, error) {
 	r.mu.Lock()
 	if r.shutdown || r.state != Leader || r.currentTerm != term {
@@ -595,9 +558,7 @@ func (r *Raft) replicateOnce(ctx context.Context, peer string, term uint64) (boo
 	return r.nextIndex[peer] <= r.log.lastIndex(), nil
 }
 
-// backtrack picks the next index to try after a consistency-check failure,
-// skipping a whole conflicting term per round trip (the optimization at the
-// end of section 5.3).
+// backtrack picks the next index after a rejection, skipping a whole conflicting term (end of 5.3).
 func (r *Raft) backtrack(reply *AppendEntriesReply) uint64 {
 	if reply.ConflictTerm != 0 {
 		if idx := r.log.lastIndexOfTerm(reply.ConflictTerm); idx != 0 {
@@ -640,8 +601,7 @@ func (r *Raft) sendSnapshot(ctx context.Context, peer string, term, seq uint64) 
 	return r.nextIndex[peer] <= r.log.lastIndex(), nil
 }
 
-// checkReplyTerm steps down if the reply carries a newer term and reports
-// whether we are still leader of term.
+// checkReplyTerm steps down on a newer term and reports whether we still lead this term.
 func (r *Raft) checkReplyTerm(replyTerm, term uint64) bool {
 	if r.shutdown {
 		return false
@@ -662,9 +622,7 @@ func (r *Raft) recordAck(peer string, seq uint64) {
 	}
 }
 
-// advanceCommit sets commitIndex to the highest index stored on a majority,
-// but only if that entry is from the current term (5.4.2). Earlier entries
-// are then committed indirectly.
+// advanceCommit commits the highest index stored on a majority if it is from the current term (5.4.2).
 func (r *Raft) advanceCommit() {
 	if r.state != Leader {
 		return
@@ -686,8 +644,7 @@ func (r *Raft) advanceCommit() {
 	r.applyCond.Broadcast()
 }
 
-// ---------------------------------------------------------------------------
-// Log replication, follower side
+// --- Log replication, follower side ---
 
 // HandleAppendEntries implements the AppendEntries receiver (Figure 2).
 func (r *Raft) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply {
@@ -704,8 +661,7 @@ func (r *Raft) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 
 	prev, prevTerm, ents := args.PrevLogIndex, args.PrevLogTerm, args.Entries
 	if snap := r.log.snapIndex(); prev < snap {
-		// Everything up to our snapshot is committed, so it matches the
-		// leader's log. Skip the part of the request it covers.
+		// Entries up to our snapshot are committed, so skip the part of the request they cover.
 		skip := snap - prev
 		if skip >= uint64(len(ents)) {
 			ents = nil
@@ -728,9 +684,7 @@ func (r *Raft) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 		return reply
 	}
 
-	// Skip entries we already have. At the first missing or conflicting
-	// entry, drop our suffix and take the leader's. Never truncate when
-	// nothing conflicts: a delayed, shorter request must not erase entries.
+	// Append new entries, truncating only at the first conflict, never for a shorter stale request.
 	for i := range ents {
 		if t, ok := r.log.term(ents[i].Index); ok && t == ents[i].Term {
 			continue
@@ -751,8 +705,7 @@ func (r *Raft) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 	seq := r.store.wal.writtenSeq()
 	r.mu.Unlock()
 
-	// Acknowledge only once the entries are on disk: the leader will count
-	// this reply toward a majority.
+	// Acknowledge only once the entries are on disk; the leader counts this reply toward a majority.
 	if err := r.store.wal.syncTo(seq); err != nil {
 		if r.isShutdown() {
 			return &AppendEntriesReply{Term: reply.Term}
@@ -783,8 +736,7 @@ func (r *Raft) HandleInstallSnapshot(args *InstallSnapshotArgs) *InstallSnapshot
 		return reply // we already have everything it covers
 	}
 
-	// If our log has the snapshot's last entry, keep what follows it.
-	// Otherwise the whole log is discarded.
+	// Keep our log suffix if it contains the snapshot's last entry, otherwise discard the whole log.
 	t, ok := r.log.term(idx)
 	retain := ok && t == term
 	var walStart uint64
@@ -812,8 +764,7 @@ func (r *Raft) HandleInstallSnapshot(args *InstallSnapshotArgs) *InstallSnapshot
 	return reply
 }
 
-// ---------------------------------------------------------------------------
-// Applying entries and snapshots
+// --- Applying entries and snapshots ---
 
 func (r *Raft) runApplier() {
 	defer r.wg.Done()
@@ -898,8 +849,7 @@ func (r *Raft) restoreSnapshot() {
 	r.notifyApplied()
 }
 
-// takeSnapshot captures the FSM on the applier goroutine, so the state is
-// exactly as of index, then serializes and writes it in the background.
+// takeSnapshot captures the FSM on the applier goroutine, then serializes and saves it in the background.
 func (r *Raft) takeSnapshot(index uint64) {
 	serialize := r.fsm.Snapshot()
 	r.snapshotting.Store(true)
@@ -955,11 +905,9 @@ func (r *Raft) notifyApplied() {
 	r.applyWaiters = keep
 }
 
-// ---------------------------------------------------------------------------
-// Client-facing API
+// --- Client-facing API ---
 
-// Propose appends commands to the leader's log in the given order and returns
-// one future per command. It fails with ErrNotLeader on other nodes.
+// Propose appends commands to the leader's log in order and returns a future for each.
 func (r *Raft) Propose(data [][]byte) ([]*Future, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -981,16 +929,7 @@ func (r *Raft) Propose(data [][]byte) ([]*Future, error) {
 	return futs, nil
 }
 
-// ReadIndex returns an index such that, once it has been applied, reading
-// the FSM is linearizable (thesis 6.4):
-//
-//  1. Take readIndex = commitIndex, but no lower than this term's no-op, so
-//     it covers every entry committed by earlier leaders.
-//  2. Confirm we are still leader: a majority must acknowledge a heartbeat
-//     sent after the request arrived. A deposed leader cannot get that.
-//
-// The caller then waits for lastApplied >= readIndex (WaitApplied). Reads
-// share heartbeat rounds, so heavy read traffic costs few extra RPCs.
+// ReadIndex returns an index after which reading the FSM is linearizable (thesis 6.4).
 func (r *Raft) ReadIndex(ctx context.Context) (uint64, error) {
 	r.mu.Lock()
 	if r.shutdown {
@@ -1020,8 +959,7 @@ func (r *Raft) ReadIndex(ctx context.Context) (uint64, error) {
 	}
 }
 
-// resolveReads releases read requests whose heartbeat a majority (counting
-// ourselves) has acknowledged.
+// resolveReads releases reads whose heartbeat a majority (counting us) has acknowledged.
 func (r *Raft) resolveReads() {
 	if len(r.readWaiters) == 0 {
 		return
@@ -1071,8 +1009,7 @@ func (r *Raft) WaitApplied(ctx context.Context, index uint64) error {
 	}
 }
 
-// Leader returns the ID of the leader this node knows about (possibly
-// itself) and whether this node is currently the leader.
+// Leader returns the known leader ID and whether this node is the leader.
 func (r *Raft) Leader() (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

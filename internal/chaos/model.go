@@ -1,6 +1,4 @@
-// Package chaos holds the pieces of the fault-injection test that are worth
-// unit testing on their own: the linearizability model handed to porcupine
-// and the bookkeeping of client histories.
+// Package chaos holds the porcupine model used by the fault-injection test.
 package chaos
 
 import (
@@ -32,11 +30,7 @@ type Input struct {
 	Value string // for set
 }
 
-// Output is what the client observed. Unknown marks an operation whose
-// outcome the client never learned (timeout, connection loss, or an error
-// that does not rule out execution). Porcupine gives such an operation an
-// open-ended return time, so it may take effect at any point after it was
-// invoked, or never.
+// Output is what the client observed; Unknown means the outcome was never learned.
 type Output struct {
 	Unknown bool
 	Exists  bool   // get: key present
@@ -51,9 +45,7 @@ type state struct {
 	value  string
 }
 
-// Model is a key-value register with GET, SET, DEL and INCR. The history is
-// partitioned by key, which is sound because every operation touches one key
-// and linearizability is compositional.
+// Model is a per-key register supporting GET, SET, DEL and INCR, partitioned by key.
 var Model = porcupine.Model{
 	Partition: func(history []porcupine.Operation) [][]porcupine.Operation {
 		byKey := map[string][]porcupine.Operation{}

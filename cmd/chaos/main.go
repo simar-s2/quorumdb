@@ -1,13 +1,4 @@
-// Command chaos is QuorumDB's fault-injection test. Each run starts a fresh
-// three-node cluster as separate processes, with a TCP proxy on every
-// directed link between nodes. Concurrent clients issue GET/SET/DEL/INCR
-// while a nemesis kills nodes (SIGKILL), pauses them (SIGSTOP), and cuts or
-// blackholes network links. Afterwards every fault is healed, the final value
-// of every key is read, and the recorded history is checked with the
-// porcupine linearizability checker. A lost acknowledged write, a stale read
-// or a double-applied increment makes the history non-linearizable.
-//
-//	go run ./cmd/chaos -bin ./bin/quorumdb -runs 100
+// Command chaos runs the fault-injection test: kills, pauses and partitions, checked with porcupine.
 package main
 
 import (
@@ -113,8 +104,7 @@ func fatalf(format string, args ...any) {
 	os.Exit(2)
 }
 
-// ---------------------------------------------------------------------------
-// Cluster processes
+// --- Cluster processes ---
 
 type node struct {
 	id        string
@@ -272,8 +262,7 @@ func (c *cluster) stop() {
 	}
 }
 
-// healAll undoes every fault: links pass traffic, paused nodes resume and
-// dead nodes restart from their data directories.
+// healAll heals every link, resumes paused nodes and restarts dead ones.
 func (c *cluster) healAll() {
 	for a := range c.proxies {
 		for b := range c.proxies[a] {
@@ -314,8 +303,7 @@ func infoField(info, field string) string {
 	return ""
 }
 
-// leader returns the index of the node that believes it is leader with the
-// highest term, or -1.
+// leader returns the index of the node leading with the highest term, or -1.
 func (c *cluster) leader() int {
 	best, bestTerm := -1, -1
 	for i, n := range c.nodes {
@@ -345,8 +333,7 @@ func (c *cluster) waitLeader(timeout time.Duration) bool {
 	return false
 }
 
-// waitConverged waits until every node has applied the same log prefix and
-// holds an identical state machine.
+// waitConverged waits until all nodes report the same applied index and state digest.
 func (c *cluster) waitConverged(timeout time.Duration) (bool, string) {
 	deadline := time.Now().Add(timeout)
 	last := ""
@@ -373,8 +360,7 @@ func (c *cluster) waitConverged(timeout time.Duration) (bool, string) {
 	return false, last
 }
 
-// ---------------------------------------------------------------------------
-// Clients
+// --- Clients ---
 
 type recorder struct {
 	start time.Time
@@ -387,8 +373,7 @@ type recorder struct {
 
 func (r *recorder) now() int64 { return time.Since(r.start).Nanoseconds() }
 
-// pending marks an operation whose outcome is unknown; it gets a return
-// time after the end of the history.
+// pending marks an operation with an unknown outcome; it gets a return time after the history ends.
 const pending = int64(-1)
 
 func (r *recorder) record(client int, in chaos.Input, call, ret int64, out chaos.Output) {
@@ -455,8 +440,7 @@ func (cl *client) send(timeout time.Duration, args ...string) (resp.Value, error
 	return v, err
 }
 
-// errNotSent means the client could not connect, so the operation never
-// happened and is not recorded.
+// errNotSent means the client could not connect, so the operation never happened.
 var errNotSent = errors.New("not sent")
 
 // do runs one operation and records it in the history.
@@ -538,8 +522,7 @@ func (cl *client) run(cfg config, stop <-chan struct{}) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Nemesis
+// --- Nemesis ---
 
 type nemesis struct {
 	c      *cluster
@@ -553,8 +536,7 @@ func (nm *nemesis) logf(format string, args ...any) {
 	nm.events = append(nm.events, fmt.Sprintf("%6.2fs  %s", time.Since(nm.start).Seconds(), fmt.Sprintf(format, args...)))
 }
 
-// target picks the leader half of the time, since leader faults are the
-// interesting ones, and a random node otherwise.
+// target picks the leader half the time and a random node otherwise.
 func (nm *nemesis) target() int {
 	if nm.rng.IntN(2) == 0 {
 		if l := nm.c.leader(); l >= 0 {
@@ -657,8 +639,7 @@ func (nm *nemesis) run(d time.Duration) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// One run
+// --- One run ---
 
 type runResult struct {
 	run         int
@@ -765,8 +746,7 @@ func runOnce(cfg config, run int, interrupted <-chan os.Signal) *runResult {
 		<-done
 	}
 
-	// Heal everything and keep the clients running for a while, so the
-	// history also covers recovery.
+	// Heal everything and keep clients running so the history also covers recovery.
 	nm.logf("heal all")
 	c.healAll()
 	c.waitLeader(10 * time.Second)
@@ -774,9 +754,7 @@ func runOnce(cfg config, run int, interrupted <-chan os.Signal) *runResult {
 	close(stop)
 	wg.Wait()
 
-	// Final reads: the last value of every key, read through a node and
-	// recorded as ordinary operations. Any acknowledged write missing here
-	// makes the history non-linearizable.
+	// Final reads of every key, recorded like any other operation; a lost acked write fails the check.
 	final := &client{id: cfg.clients, c: c, rec: rec, rng: rand.New(rand.NewPCG(cfg.seed, 99))}
 	finalValues := map[string]chaos.Output{}
 	var keys []string
@@ -808,8 +786,7 @@ func runOnce(cfg config, run int, interrupted <-chan os.Signal) *runResult {
 	final.close()
 	res.converged, res.convergeInfo = c.waitConverged(20 * time.Second)
 
-	// Counter check: the final value must include every acknowledged INCR
-	// and cannot exceed acknowledged + ambiguous ones.
+	// Counter check: each final value must lie between acked and acked + ambiguous INCRs.
 	for i := 0; i < cfg.counters; i++ {
 		k := fmt.Sprintf("c%d", i)
 		out, ok := finalValues[k]
@@ -867,8 +844,7 @@ func saveHistory(path string, ops []porcupine.Operation) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Summary
+// --- Summary ---
 
 type summary struct {
 	text   string

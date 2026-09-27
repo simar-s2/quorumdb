@@ -1,8 +1,4 @@
-// Package raft implements the Raft consensus algorithm as described in
-// "In Search of an Understandable Consensus Algorithm" (Ongaro & Ousterhout)
-// and Diego Ongaro's PhD thesis: leader election with pre-vote, log
-// replication, durable persistence, snapshots with log compaction, and
-// ReadIndex linearizable reads.
+// Package raft implements Raft from the paper and thesis: election, replication, snapshots and ReadIndex.
 package raft
 
 import (
@@ -41,13 +37,11 @@ type EntryType uint8
 const (
 	// EntryCommand carries state machine data.
 	EntryCommand EntryType = iota + 1
-	// EntryNoop is appended by every new leader so it can commit entries
-	// from earlier terms and serve ReadIndex reads (thesis section 6.4).
+	// EntryNoop is appended by each new leader to commit earlier-term entries and enable ReadIndex.
 	EntryNoop
 )
 
-// Entry is one slot of the replicated log. Data is never modified after the
-// entry is created, so slices of it can be shared freely.
+// Entry is one log slot; Data is never modified once created.
 type Entry struct {
 	Index uint64
 	Term  uint64
@@ -55,8 +49,7 @@ type Entry struct {
 	Data  []byte
 }
 
-// RequestVoteArgs is used for both real votes and pre-votes. A pre-vote asks
-// "would you vote for me in Term?" without anyone changing their term.
+// RequestVoteArgs is used for real votes and for pre-votes, which change no one's term.
 type RequestVoteArgs struct {
 	Term         uint64
 	CandidateID  string
@@ -79,21 +72,16 @@ type AppendEntriesArgs struct {
 	LeaderCommit uint64
 }
 
-// AppendEntriesReply includes conflict hints so the leader can skip back a
-// whole term at a time instead of one entry per round trip.
+// AppendEntriesReply carries conflict hints so the leader can skip back a whole term at once.
 type AppendEntriesReply struct {
 	Term    uint64
 	Success bool
-	// When the follower's log is too short, ConflictTerm is 0 and
-	// ConflictIndex is the follower's last index + 1. Otherwise
-	// ConflictTerm is the term of the follower's entry at PrevLogIndex and
-	// ConflictIndex is the first index the follower has for that term.
+	// Conflict hints: our term at PrevLogIndex and its first index, or ConflictTerm 0 and our last index + 1.
 	ConflictIndex uint64
 	ConflictTerm  uint64
 }
 
-// InstallSnapshotArgs sends a whole snapshot in one message. The paper's
-// chunked transfer is not implemented; snapshots of this store are small.
+// InstallSnapshotArgs sends the whole snapshot in one message (no chunking).
 type InstallSnapshotArgs struct {
 	Term              uint64
 	LeaderID          string
@@ -113,14 +101,7 @@ type Transport interface {
 	InstallSnapshot(ctx context.Context, target string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error)
 }
 
-// FSM is the replicated state machine. Apply is called for committed command
-// entries, in log order, from a single goroutine.
-//
-// Snapshot is called from that same goroutine, so it sees the state as of the
-// last Apply. It should only capture that state cheaply (for example a
-// shallow copy of immutable values) and return a function that serializes
-// it. Raft calls the function in the background while Apply continues, so a
-// large snapshot does not stall the write path.
+// FSM is the replicated state machine; Apply and Snapshot run on the single applier goroutine.
 type FSM interface {
 	Apply(index uint64, data []byte) any
 	Snapshot() (serialize func() ([]byte, error))
@@ -130,8 +111,7 @@ type FSM interface {
 var (
 	ErrNotLeader = errors.New("raft: not the leader")
 	ErrShutdown  = errors.New("raft: node is shut down")
-	// ErrLeadershipLost means the entry was appended by this node as leader
-	// but its fate is unknown: it may or may not commit under a new leader.
+	// ErrLeadershipLost means an entry this node proposed may or may not commit.
 	ErrLeadershipLost = errors.New("raft: leadership lost, outcome unknown")
 )
 
@@ -142,16 +122,13 @@ type Config struct {
 	DataDir string
 
 	HeartbeatInterval time.Duration // default 50ms
-	// ElectionTimeout is the minimum; each timeout is drawn uniformly from
-	// [ElectionTimeout, 2*ElectionTimeout). Default 300ms.
+	// ElectionTimeout is the minimum; each timeout is random in [T, 2T). Default 300ms.
 	ElectionTimeout time.Duration
-	// SnapshotThreshold is how many applied entries may accumulate in the
-	// log before a snapshot is taken. Default 10000.
+	// SnapshotThreshold is how many applied entries trigger a snapshot. Default 10000.
 	SnapshotThreshold uint64
 	// MaxAppendEntries caps the entries sent in one AppendEntries RPC.
 	MaxAppendEntries int
-	// NoSync skips fsync. Data then survives a process crash (it is in the
-	// OS page cache) but not a power failure. Only for experiments.
+	// NoSync skips fsync (survives process crashes, not power loss); only for experiments.
 	NoSync bool
 	Logger *slog.Logger
 }

@@ -893,22 +893,23 @@ func (r *Raft) restoreSnapshot() {
 	r.notifyApplied()
 }
 
-// takeSnapshot captures the FSM (on the applier goroutine, so the state is
-// exactly as of index) and writes it to disk in the background.
+// takeSnapshot captures the FSM on the applier goroutine, so the state is
+// exactly as of index, then serializes and writes it in the background.
 func (r *Raft) takeSnapshot(index uint64) {
-	data, err := r.fsm.Snapshot()
-	if err != nil {
-		r.logger.Error("raft: FSM snapshot failed", "err", err)
-		return
-	}
+	serialize := r.fsm.Snapshot()
 	r.snapshotting.Store(true)
 	r.wg.Add(1)
-	go r.persistSnapshot(index, data)
+	go r.persistSnapshot(index, serialize)
 }
 
-func (r *Raft) persistSnapshot(index uint64, data []byte) {
+func (r *Raft) persistSnapshot(index uint64, serialize func() ([]byte, error)) {
 	defer r.wg.Done()
 	defer r.snapshotting.Store(false)
+	data, err := serialize()
+	if err != nil {
+		r.logger.Error("raft: serializing snapshot failed", "err", err)
+		return
+	}
 	r.snapMu.Lock()
 	defer r.snapMu.Unlock()
 

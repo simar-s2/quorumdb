@@ -183,7 +183,9 @@ func TestSnapshotRestoreAndDigest(t *testing.T) {
 	h := newHarness(t)
 	h.apply(Command{Op: OpMSet, Args: args("a", "1", "b", "")})
 	h.apply(Command{Op: OpSet, ExpireAt: 12345, Args: args("c", "x")})
-	snap, err := h.s.Snapshot()
+	serialize := h.s.Snapshot()
+	h.apply(Command{Op: OpSet, Args: args("late", "write")}) // after the capture: not in the snapshot
+	snap, err := serialize()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,6 +194,7 @@ func TestSnapshotRestoreAndDigest(t *testing.T) {
 	if err := other.Restore(snap); err != nil {
 		t.Fatal(err)
 	}
+	h.apply(Command{Op: OpDel, Args: args("late")})
 	if other.Digest() != h.s.Digest() {
 		t.Fatal("digest differs after restore")
 	}

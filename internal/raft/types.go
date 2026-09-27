@@ -114,11 +114,16 @@ type Transport interface {
 }
 
 // FSM is the replicated state machine. Apply is called for committed command
-// entries, in log order, from a single goroutine. Snapshot is called from the
-// same goroutine, so it always captures the state as of the last Apply.
+// entries, in log order, from a single goroutine.
+//
+// Snapshot is called from that same goroutine, so it sees the state as of the
+// last Apply. It should only capture that state cheaply (for example a
+// shallow copy of immutable values) and return a function that serializes
+// it. Raft calls the function in the background while Apply continues, so a
+// large snapshot does not stall the write path.
 type FSM interface {
 	Apply(index uint64, data []byte) any
-	Snapshot() ([]byte, error)
+	Snapshot() (serialize func() ([]byte, error))
 	Restore(data []byte) error
 }
 

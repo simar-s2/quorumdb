@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"maps"
 	"math"
 	"sort"
 	"strconv"
@@ -257,22 +258,26 @@ func (s *Store) sortedKeys() []string {
 
 const snapshotVersion = 1
 
-// Snapshot serializes the whole store in key order:
+// Snapshot takes a shallow copy of the map, which is a consistent point-in-
+// time view because stored values are never modified in place (Apply always
+// replaces an item). The returned function encodes that copy as:
 // version | uvarint count | (uvarint klen | key | uvarint vlen | value | varint exp)*
-func (s *Store) Snapshot() ([]byte, error) {
+func (s *Store) Snapshot() func() ([]byte, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	b := []byte{snapshotVersion}
-	b = binary.AppendUvarint(b, uint64(len(s.data)))
-	for _, k := range s.sortedKeys() {
-		it := s.data[k]
-		b = binary.AppendUvarint(b, uint64(len(k)))
-		b = append(b, k...)
-		b = binary.AppendUvarint(b, uint64(len(it.val)))
-		b = append(b, it.val...)
-		b = binary.AppendVarint(b, it.exp)
+	data := maps.Clone(s.data)
+	s.mu.RUnlock()
+	return func() ([]byte, error) {
+		b := []byte{snapshotVersion}
+		b = binary.AppendUvarint(b, uint64(len(data)))
+		for k, it := range data {
+			b = binary.AppendUvarint(b, uint64(len(k)))
+			b = append(b, k...)
+			b = binary.AppendUvarint(b, uint64(len(it.val)))
+			b = append(b, it.val...)
+			b = binary.AppendVarint(b, it.exp)
+		}
+		return b, nil
 	}
-	return b, nil
 }
 
 // Restore replaces the store's contents with a snapshot.

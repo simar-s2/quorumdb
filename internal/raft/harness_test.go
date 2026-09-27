@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -125,12 +126,15 @@ func (f *testFSM) Apply(index uint64, data []byte) any {
 	return index
 }
 
-func (f *testFSM) Snapshot() ([]byte, error) {
+func (f *testFSM) Snapshot() func() ([]byte, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	var buf bytes.Buffer
-	err := gob.NewEncoder(&buf).Encode(fsmSnapshot{Last: f.last, Vals: f.vals})
-	return buf.Bytes(), err
+	snap := fsmSnapshot{Last: f.last, Vals: maps.Clone(f.vals)}
+	f.mu.Unlock()
+	return func() ([]byte, error) {
+		var buf bytes.Buffer
+		err := gob.NewEncoder(&buf).Encode(snap)
+		return buf.Bytes(), err
+	}
 }
 
 func (f *testFSM) Restore(data []byte) error {

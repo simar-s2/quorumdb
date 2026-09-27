@@ -677,7 +677,7 @@ func (r *runResult) line(total int) string {
 	for _, k := range sortedKeys(r.faults) {
 		fs = append(fs, fmt.Sprintf("%s:%d", k, r.faults[k]))
 	}
-	s := fmt.Sprintf("run %3d/%d  ops %5d  acked writes %4d  ambiguous %3d  faults [%s]  linearizable %s  converged %s  counters %s  %4.1fs",
+	s := fmt.Sprintf("run %3d/%d  ops %4d  acked %4d  ambiguous %3d  [%s]  linearizable %s  converged %s  counters %s  %4.1fs",
 		r.run, total, r.ops, r.acked, r.ambiguous, strings.Join(fs, " "),
 		map[bool]string{true: "ok", false: string(r.linearizable)}[r.linearizable == porcupine.Ok],
 		mark(r.converged), mark(r.counterErr == ""), r.elapsed.Seconds())

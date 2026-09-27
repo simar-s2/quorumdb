@@ -2,7 +2,7 @@ GO    ?= go
 RUNS  ?= 100
 CHAOS_DURATION ?= 10s
 
-.PHONY: build test test-race vet cluster-up cluster-down cluster-status bench chaos chaos-negative clean
+.PHONY: build test test-race vet cluster-up cluster-down cluster-status kill-leader bench chaos chaos-negative clean help
 
 build: ## Build the node binary and the chaos harness into ./bin
 	$(GO) build -o bin/quorumdb ./cmd/quorumdb
@@ -26,6 +26,9 @@ cluster-down: ## Stop the cluster and delete its volumes
 
 cluster-status: ## Show each node's role, term and log position
 	@scripts/cluster-status.sh
+
+kill-leader: ## Kill the current leader container to watch a failover
+	@leader=$$(scripts/leader.sh) && docker compose kill $$leader >/dev/null && echo "killed $$leader (the leader); restart it with: docker compose start"
 
 bench: ## redis-benchmark against the leader (env: REQUESTS CLIENTS PIPELINE TESTS TARGET)
 	@scripts/bench.sh

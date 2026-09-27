@@ -27,6 +27,13 @@ host=$leader
 [ "$TARGET" = follower ] && host=$follower
 
 args=(-h "$host" -p 6379 -t "$TESTS" -n "$REQUESTS" -c "$CLIENTS" -P "$PIPELINE" -r "$KEYSPACE" --csv)
-echo "# target: $host ($TARGET), leader: $leader"
-echo "# redis-benchmark ${args[*]}"
-docker compose run --rm bench "${args[@]}" 2>/dev/null | tr -d '\r'
+echo "target: $host ($TARGET)   leader: $leader"
+echo "redis-benchmark ${args[*]}"
+csv=$(docker compose run --rm bench "${args[@]}" 2>/dev/null | tr -d '\r')
+if [ -n "${RAW:-}" ]; then
+  echo "$csv"
+  exit 0
+fi
+echo
+echo "$csv" | awk -F'","' 'NR == 1 {printf "%-6s %12s %9s %9s %9s %9s %9s\n", "test", "requests/s", "avg ms", "p50 ms", "p95 ms", "p99 ms", "max ms"; next}
+  {gsub(/"/, ""); printf "%-6s %12s %9s %9s %9s %9s %9s\n", $1, $2, $3, $5, $6, $7, $8}'

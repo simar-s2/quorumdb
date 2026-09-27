@@ -12,10 +12,15 @@ import (
 	"time"
 )
 
-const (
-	maxApplyBatch   = 1024
-	snapshotTimeout = 30 * time.Second
-)
+const maxApplyBatch = 1024
+
+// snapshotTimeout bounds an InstallSnapshot RPC: a base allowance plus one
+// second per MiB. A fixed long timeout would let a silently dropped
+// connection stall replication to that follower long after the network
+// heals.
+func snapshotTimeout(size int) time.Duration {
+	return 2*time.Second + time.Duration(size>>20)*time.Second
+}
 
 var errStepDown = errors.New("raft: no longer leader for this term")
 
@@ -614,7 +619,7 @@ func (r *Raft) sendSnapshot(ctx context.Context, peer string, term, seq uint64) 
 		LastIncludedTerm:  meta.Term,
 		Data:              data,
 	}
-	rctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
+	rctx, cancel := context.WithTimeout(ctx, snapshotTimeout(len(data)))
 	reply, err := r.trans.InstallSnapshot(rctx, peer, args)
 	cancel()
 	if err != nil {

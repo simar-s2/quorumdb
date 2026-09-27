@@ -38,6 +38,11 @@ type Config struct {
 	Raft           raft.Config
 	CommandTimeout time.Duration
 	Logger         *slog.Logger
+
+	// Deliberately unsafe modes, used only as negative controls for the
+	// chaos test (it must detect the violations they cause).
+	UnsafeLocalReads bool // serve reads from local state on any node, skipping ReadIndex
+	UnsafeEarlyAck   bool // acknowledge SET as soon as the leader appends it, before commit
 }
 
 type Server struct {
@@ -259,6 +264,14 @@ func (s *Server) execBatch(batch [][][]byte) (replies [][]byte, quit bool) {
 // otherwise by forwarding. A request is only retried when it provably was
 // not executed (or is read-only), so a write is never applied twice.
 func (s *Server) route(cmds [][][]byte, readOnly bool) [][]byte {
+	if readOnly && s.cfg.UnsafeLocalReads {
+		now := time.Now().UnixMilli()
+		out := make([][]byte, len(cmds))
+		for k, args := range cmds {
+			out[k] = commands[strings.ToLower(string(args[0]))].read(s, nil, args, now)
+		}
+		return out
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.CommandTimeout)
 	defer cancel()
 	for {
@@ -367,6 +380,10 @@ func (s *Server) execWrites(ctx context.Context, cmds [][][]byte, out [][]byte) 
 		return err
 	}
 	for x, f := range futs {
+		if s.cfg.UnsafeEarlyAck && strings.EqualFold(string(cmds[pos[x]][0]), "set") && len(cmds[pos[x]]) == 3 {
+			out[pos[x]] = resp.AppendSimple(nil, "OK")
+			continue
+		}
 		res, err := f.Wait(ctx)
 		if err != nil {
 			out[pos[x]] = errorReply(err)

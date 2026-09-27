@@ -31,6 +31,9 @@ func main() {
 		fsync      = flag.Bool("fsync", true, "fsync the log before acknowledging (disable only for experiments)")
 		cmdTimeout = flag.Duration("command-timeout", 5*time.Second, "how long a client command may wait for commit")
 		logLevel   = flag.String("log-level", "info", "debug, info, warn or error")
+
+		unsafeLocalReads = flag.Bool("unsafe-local-reads", false, "UNSAFE: serve reads from local state without ReadIndex (negative control for the chaos test)")
+		unsafeEarlyAck   = flag.Bool("unsafe-early-ack", false, "UNSAFE: acknowledge SET before it commits (negative control for the chaos test)")
 	)
 	flag.Parse()
 
@@ -60,8 +63,10 @@ func main() {
 			SnapshotThreshold: *snapEvery,
 			NoSync:            !*fsync,
 		},
-		CommandTimeout: *cmdTimeout,
-		Logger:         logger,
+		CommandTimeout:   *cmdTimeout,
+		Logger:           logger,
+		UnsafeLocalReads: *unsafeLocalReads,
+		UnsafeEarlyAck:   *unsafeEarlyAck,
 	})
 	if err != nil {
 		fatal("starting node: %v", err)

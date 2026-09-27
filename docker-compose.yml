@@ -1,0 +1,51 @@
+# Three-node QuorumDB cluster. Clients can talk to any node:
+#   redis-cli -p 6379   (n1)
+#   redis-cli -p 6380   (n2)
+#   redis-cli -p 6381   (n3)
+name: quorumdb
+
+x-node: &node
+  build: .
+  restart: "no"
+  stop_grace_period: 5s
+  environment:
+    GOGC: ${GOGC:-100}
+
+services:
+  n1:
+    <<: *node
+    hostname: n1
+    command: ["-id", "n1", "-redis-addr", ":6379", "-raft-addr", ":7000",
+              "-peers", "n1=n1:7000,n2=n2:7000,n3=n3:7000", "-data", "/data",
+              "-snapshot-threshold=${SNAPSHOT_THRESHOLD:-10000}", "-fsync=${FSYNC:-true}"]
+    ports: ["6379:6379"]
+    volumes: ["n1-data:/data"]
+
+  n2:
+    <<: *node
+    hostname: n2
+    command: ["-id", "n2", "-redis-addr", ":6379", "-raft-addr", ":7000",
+              "-peers", "n1=n1:7000,n2=n2:7000,n3=n3:7000", "-data", "/data",
+              "-snapshot-threshold=${SNAPSHOT_THRESHOLD:-10000}", "-fsync=${FSYNC:-true}"]
+    ports: ["6380:6379"]
+    volumes: ["n2-data:/data"]
+
+  n3:
+    <<: *node
+    hostname: n3
+    command: ["-id", "n3", "-redis-addr", ":6379", "-raft-addr", ":7000",
+              "-peers", "n1=n1:7000,n2=n2:7000,n3=n3:7000", "-data", "/data",
+              "-snapshot-threshold=${SNAPSHOT_THRESHOLD:-10000}", "-fsync=${FSYNC:-true}"]
+    ports: ["6381:6379"]
+    volumes: ["n3-data:/data"]
+
+  # redis-benchmark inside the cluster network, used by `make bench`.
+  bench:
+    image: redis:8-alpine
+    profiles: ["tools"]
+    entrypoint: ["redis-benchmark"]
+
+volumes:
+  n1-data:
+  n2-data:
+  n3-data:

@@ -35,5 +35,5 @@ if [ -n "${RAW:-}" ]; then
   exit 0
 fi
 echo
-echo "$csv" | awk -F'","' 'NR == 1 {printf "%-6s %12s %9s %9s %9s %9s %9s\n", "test", "requests/s", "avg ms", "p50 ms", "p95 ms", "p99 ms", "max ms"; next}
+echo "$csv" | awk -F, 'NR == 1 {printf "%-6s %12s %9s %9s %9s %9s %9s\n", "test", "requests/s", "avg ms", "p50 ms", "p95 ms", "p99 ms", "max ms"; next}
   {gsub(/"/, ""); printf "%-6s %12s %9s %9s %9s %9s %9s\n", $1, $2, $3, $5, $6, $7, $8}'

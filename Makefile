@@ -18,7 +18,9 @@ vet:
 	$(GO) vet ./...
 
 cluster-up: ## Start the 3-node cluster in Docker and wait for a leader
-	docker compose up -d --build n1 n2 n3
+	@echo "building image (the first build takes about a minute)..."
+	@docker compose build --quiet n1 n2 n3
+	docker compose up -d n1 n2 n3
 	@scripts/wait-leader.sh
 
 cluster-down: ## Stop the cluster and delete its volumes

@@ -449,7 +449,9 @@ func cmdInfo(s *Server, b []byte, args [][]byte) []byte {
 	}
 	st := s.raft.Status()
 	var sb strings.Builder
-	want := func(name string) bool { return section == "all" || section == "default" || section == "everything" || section == name }
+	want := func(name string) bool {
+		return section == "all" || section == "default" || section == "everything" || section == name
+	}
 	if want("server") {
 		fmt.Fprintf(&sb, "# Server\r\nredis_version:7.0.0\r\nquorumdb_version:%s\r\nnode_id:%s\r\nredis_addr:%s\r\nraft_addr:%s\r\nuptime_in_seconds:%d\r\n\r\n",
 			version, s.cfg.ID, s.ln.Addr(), s.trans.Addr(), int(time.Since(s.started).Seconds()))

@@ -1,0 +1,15 @@
+==== QuorumDB chaos summary ====
+runs passed                 0 / 10
+linearizability violations  10   (porcupine: 0 ok, 10 illegal, 0 timed out)
+replicas converged          10 / 10
+counter checks passed       10 / 10
+operations recorded         55254
+  acknowledged writes       32070
+  ambiguous writes          974   (timed out or failed; may or may not have applied)
+  successful reads          22210   (1 failed reads not recorded)
+faults injected             86   (bridge 15, isolate 21, kill 15, one-way 24, pause 11)
+setup                       3 nodes, 8 clients, 4 registers + 2 counters, 10s of faults per run, snapshot every 200 entries
+seed                        1790482401645968000
+host                        darwin/arm64, 10 CPUs
+wall time                   4m22s
+node flags                  -unsafe-local-reads

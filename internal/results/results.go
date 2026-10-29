@@ -63,6 +63,70 @@ type BenchmarkRun struct {
 	LeaderChanged bool `json:"leader_changed"`
 }
 
+// Chaos is the summary written by cmd/chaos: totals over every run, then one entry per run.
+type Chaos struct {
+	Kind        string        `json:"kind"`        // always "chaos"
+	Environment string        `json:"environment"` // "local" or "gke"
+	StartedAt   time.Time     `json:"started_at"`
+	WallSeconds float64       `json:"wall_seconds"`
+	Settings    ChaosSettings `json:"settings"`
+	Nodes       []Node        `json:"nodes,omitempty"`
+	Client      Client        `json:"client"`
+
+	Runs                      int `json:"runs"`
+	Passed                    int `json:"passed"`
+	LinearizabilityViolations int `json:"linearizability_violations"`
+	PorcupineTimeouts         int `json:"porcupine_timeouts"`
+	NotConverged              int `json:"not_converged"`
+	CounterFailures           int `json:"counter_failures"`
+	FinalReadFailures         int `json:"final_read_failures"`
+	SetupFailures             int `json:"setup_failures"`
+
+	Operations int `json:"operations"`
+	// AcknowledgedWrites counts every write that got a success reply: the porcupine-checked
+	// SET/DEL/INCR operations plus the write-once SETs.
+	AcknowledgedWrites int `json:"acknowledged_writes"`
+	AmbiguousWrites    int `json:"ambiguous_writes"`
+	SuccessfulReads    int `json:"successful_reads"`
+	FailedReads        int `json:"failed_reads"`
+	// ConfirmedWritesChecked counts acknowledged writes whose survival was checked one by one: the
+	// write-once keys read back at the end, and the acknowledged INCRs compared with the final
+	// counter values. LostConfirmedWrites is how many of them were missing.
+	ConfirmedWritesChecked int `json:"confirmed_writes_checked"`
+	LostConfirmedWrites    int `json:"lost_confirmed_writes"`
+
+	Faults      map[string]int `json:"faults"`
+	TotalFaults int            `json:"total_faults"`
+
+	PerRun []ChaosRun `json:"per_run"`
+}
+
+type ChaosSettings struct {
+	Clients            int     `json:"clients"`
+	Registers          int     `json:"registers"`
+	Counters           int     `json:"counters"`
+	FaultSecondsPerRun float64 `json:"fault_seconds_per_run"`
+	SnapshotThreshold  int     `json:"snapshot_threshold"`
+	Seed               uint64  `json:"seed"`
+	NodeFlags          string  `json:"node_flags,omitempty"`
+}
+
+// ChaosRun is the outcome of one run.
+type ChaosRun struct {
+	Run                    int            `json:"run"`
+	Passed                 bool           `json:"passed"`
+	Seconds                float64        `json:"seconds"`
+	Operations             int            `json:"operations"`
+	AcknowledgedWrites     int            `json:"acknowledged_writes"`
+	AmbiguousWrites        int            `json:"ambiguous_writes"`
+	ConfirmedWritesChecked int            `json:"confirmed_writes_checked"`
+	LostConfirmedWrites    int            `json:"lost_confirmed_writes"`
+	Linearizable           string         `json:"linearizable"` // porcupine's verdict: Ok, Illegal or Unknown
+	Converged              bool           `json:"converged"`
+	Faults                 map[string]int `json:"faults"`
+	Error                  string         `json:"error,omitempty"`
+}
+
 // The lines around the JSON when it is printed to standard output, so a script can cut it out of a
 // Kubernetes Job's log, where it is mixed with progress messages.
 const (

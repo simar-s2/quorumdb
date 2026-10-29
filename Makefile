@@ -42,8 +42,9 @@ bench: ## redis-benchmark against the leader and a follower, 3 runs each; saves 
 	docker compose run --rm tools benchmark -environment local -description "$(HOST_DESCRIPTION)" \
 		-out /results/benchmark.json $(BENCH_FLAGS)
 
-chaos: build ## Fault-injection test with linearizability checking (env: RUNS CHAOS_DURATION)
-	bin/chaos -runs $(RUNS) -duration $(CHAOS_DURATION)
+chaos: build ## Fault-injection test with linearizability checking (env: RUNS CHAOS_DURATION); saves results/local/chaos.json
+	@mkdir -p results/local
+	bin/chaos -runs $(RUNS) -duration $(CHAOS_DURATION) -summary results/local/chaos.json
 
 chaos-negative: build ## Show that the chaos checker catches deliberately unsafe builds
 	-bin/chaos -runs 10 -duration $(CHAOS_DURATION) -node-flags "-unsafe-local-reads" -out chaos-results/unsafe-local-reads

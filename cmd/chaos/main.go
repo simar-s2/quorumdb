@@ -3,7 +3,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"math/rand/v2"
@@ -20,6 +19,7 @@ import (
 
 	"github.com/anishathalye/porcupine"
 	"github.com/simar-s2/quorumdb/internal/chaos"
+	"github.com/simar-s2/quorumdb/internal/results"
 )
 
 type config struct {
@@ -31,6 +31,7 @@ type config struct {
 	counters     int
 	seed         uint64
 	out          string
+	summaryPath  string
 	snapshotAt   int
 	checkTimeout time.Duration
 	nodeFlags    []string
@@ -47,6 +48,7 @@ func main() {
 	flag.IntVar(&cfg.counters, "counters", 2, "counter keys (INCR/GET)")
 	flag.Uint64Var(&cfg.seed, "seed", 0, "random seed (0 = time based)")
 	flag.StringVar(&cfg.out, "out", "chaos-results", "directory for the summary and for logs of failed runs")
+	flag.StringVar(&cfg.summaryPath, "summary", "", "where to write the JSON summary (default <out>/summary.json; - prints it)")
 	flag.IntVar(&cfg.snapshotAt, "snapshot-threshold", 200, "node snapshot threshold; small so snapshots and InstallSnapshot happen often")
 	flag.DurationVar(&cfg.checkTimeout, "check-timeout", 2*time.Minute, "porcupine time budget per run")
 	flag.StringVar(&nodeFlags, "node-flags", "", "extra flags for every node, space separated (e.g. -unsafe-local-reads)")
@@ -61,6 +63,9 @@ func main() {
 	if err := os.MkdirAll(cfg.out, 0o755); err != nil {
 		fatalf("%v", err)
 	}
+	if cfg.summaryPath == "" {
+		cfg.summaryPath = filepath.Join(cfg.out, "summary.json")
+	}
 
 	interrupted := make(chan os.Signal, 1)
 	signal.Notify(interrupted, os.Interrupt, syscall.SIGTERM)
@@ -72,22 +77,22 @@ func main() {
 	}
 	fmt.Println()
 
-	var results []*runResult
+	var runResults []*runResult
 	start := time.Now()
 	for i := 1; i <= cfg.runs; i++ {
 		res := runOnce(cfg, i, interrupted)
-		results = append(results, res)
+		runResults = append(runResults, res)
 		fmt.Println(res.line(cfg.runs))
 		if res.interrupted {
 			break
 		}
 	}
-	s := summarize(cfg, results, time.Since(start))
+	s := summarize(cfg, runResults, start)
 	fmt.Println()
 	fmt.Print(s.text)
 	os.WriteFile(filepath.Join(cfg.out, "summary.txt"), []byte(s.text), 0o644)
-	if b, err := json.MarshalIndent(s.json, "", "  "); err == nil {
-		os.WriteFile(filepath.Join(cfg.out, "summary.json"), b, 0o644)
+	if err := results.Write(cfg.summaryPath, s.json); err != nil {
+		fmt.Fprintf(os.Stderr, "chaos: writing the summary: %v\n", err)
 	}
 	if !s.passed {
 		os.Exit(1)
@@ -110,6 +115,9 @@ type runResult struct {
 	ops, acked, ambiguous, readsOK, readsFailed int
 	faults                                      map[string]int
 
+	// Acknowledged writes checked one by one at the end (write-once keys and INCRs), and how many were lost.
+	confirmedChecked, lostWrites int
+
 	linearizable porcupine.CheckResult
 	converged    bool
 	convergeInfo string
@@ -119,7 +127,8 @@ type runResult struct {
 }
 
 func (r *runResult) passed() bool {
-	return r.setupErr == "" && r.finalErr == "" && r.linearizable == porcupine.Ok && r.converged && r.counterErr == ""
+	return r.setupErr == "" && r.finalErr == "" && r.linearizable == porcupine.Ok && r.converged && r.counterErr == "" &&
+		r.lostWrites == 0
 }
 
 func mark(ok bool) string {
@@ -137,8 +146,8 @@ func (r *runResult) line(total int) string {
 	for _, k := range sortedKeys(r.faults) {
 		fs = append(fs, fmt.Sprintf("%s:%d", k, r.faults[k]))
 	}
-	s := fmt.Sprintf("run %3d/%d  ops %4d  acked %4d  ambiguous %3d  [%s]  linearizable %s  converged %s  counters %s  %4.1fs",
-		r.run, total, r.ops, r.acked, r.ambiguous, strings.Join(fs, " "),
+	s := fmt.Sprintf("run %3d/%d  ops %4d  acked %4d  ambiguous %3d  lost %d  [%s]  linearizable %s  converged %s  counters %s  %4.1fs",
+		r.run, total, r.ops, r.acked, r.ambiguous, r.lostWrites, strings.Join(fs, " "),
 		map[bool]string{true: "ok", false: string(r.linearizable)}[r.linearizable == porcupine.Ok],
 		mark(r.converged), mark(r.counterErr == ""), r.elapsed.Seconds())
 	for _, e := range []string{r.finalErr, r.counterErr} {
@@ -187,7 +196,8 @@ func runOnce(cfg config, run int, interrupted <-chan os.Signal) *runResult {
 		return res
 	}
 
-	rec := &recorder{start: time.Now(), ackedIncr: map[string]int{}, ambiguousIncr: map[string]int{}}
+	rec := &recorder{start: time.Now(), ackedIncr: map[string]int{}, ambiguousIncr: map[string]int{},
+		writeOnceAcked: map[string]string{}}
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.clients; i++ {
@@ -243,6 +253,13 @@ func runOnce(cfg config, run int, interrupted <-chan os.Signal) *runResult {
 			res.finalErr = "could not read final value of " + k
 		}
 	}
+	// Every acknowledged write-once key must still be there with its value.
+	lostWriteOnce, err := final.readBackWriteOnceKeys(rec.writeOnceAcked)
+	if err != nil {
+		res.finalErr = err.Error()
+	}
+	res.confirmedChecked += len(rec.writeOnceAcked)
+	res.lostWrites += lostWriteOnce
 	final.close()
 	res.converged, res.convergeInfo = waitConverged(c, 20*time.Second)
 
@@ -258,6 +275,11 @@ func runOnce(cfg config, run int, interrupted <-chan os.Signal) *runResult {
 			v, _ = strconv.ParseInt(out.Value, 10, 64)
 		}
 		lo, hi := int64(rec.ackedIncr[k]), int64(rec.ackedIncr[k]+rec.ambiguousIncr[k])
+		// A final value below the acknowledged count means that many acknowledged INCRs were lost.
+		res.confirmedChecked += rec.ackedIncr[k]
+		if v < lo {
+			res.lostWrites += int(lo - v)
+		}
 		if v < lo || v > hi {
 			res.counterErr += fmt.Sprintf("counter %s = %d, expected between %d (acked) and %d (acked + ambiguous); ", k, v, lo, hi)
 		}
@@ -272,6 +294,8 @@ func runOnce(cfg config, run int, interrupted <-chan os.Signal) *runResult {
 	}
 	res.ops = len(rec.ops)
 	res.acked, res.ambiguous, res.readsOK, res.readsFailed = rec.acked, rec.ambiguous, rec.readsOK, rec.readsFailed
+	res.acked += len(rec.writeOnceAcked)
+	res.ambiguous += rec.writeOnceAmbiguous
 	result, info := porcupine.CheckOperationsVerbose(chaos.Model, rec.ops, cfg.checkTimeout)
 	res.linearizable = result
 
@@ -308,84 +332,120 @@ func saveHistory(path string, ops []porcupine.Operation) {
 
 type summary struct {
 	text   string
-	json   map[string]any
+	json   results.Chaos
 	passed bool
 }
 
-func summarize(cfg config, results []*runResult, elapsed time.Duration) summary {
-	var passed, setupFailed, illegal, unknown, notConverged, counterBad, finalBad int
-	var ops, acked, ambiguous, readsOK, readsFailed int
-	faults := map[string]int{}
-	for _, r := range results {
+// summary is this run's entry in the JSON summary.
+func (r *runResult) summary() results.ChaosRun {
+	var problems []string
+	for _, problem := range []string{r.setupErr, r.finalErr, r.counterErr} {
+		if problem != "" {
+			problems = append(problems, problem)
+		}
+	}
+	if r.setupErr == "" && !r.converged {
+		problems = append(problems, "not converged: "+r.convergeInfo)
+	}
+	return results.ChaosRun{
+		Run:                    r.run,
+		Passed:                 r.passed(),
+		Seconds:                r.elapsed.Seconds(),
+		Operations:             r.ops,
+		AcknowledgedWrites:     r.acked,
+		AmbiguousWrites:        r.ambiguous,
+		ConfirmedWritesChecked: r.confirmedChecked,
+		LostConfirmedWrites:    r.lostWrites,
+		Linearizable:           string(r.linearizable),
+		Converged:              r.converged,
+		Faults:                 r.faults,
+		Error:                  strings.Join(problems, "; "),
+	}
+}
+
+func summarize(cfg config, runResults []*runResult, start time.Time) summary {
+	elapsed := time.Since(start)
+	s := results.Chaos{
+		Kind:        "chaos",
+		Environment: "local",
+		StartedAt:   start.UTC(),
+		WallSeconds: elapsed.Seconds(),
+		Settings: results.ChaosSettings{
+			Clients:            cfg.clients,
+			Registers:          cfg.registers,
+			Counters:           cfg.counters,
+			FaultSecondsPerRun: cfg.duration.Seconds(),
+			SnapshotThreshold:  cfg.snapshotAt,
+			Seed:               cfg.seed,
+			NodeFlags:          strings.Join(cfg.nodeFlags, " "),
+		},
+		Client: results.Client{OS: runtime.GOOS + "/" + runtime.GOARCH, CPUs: runtime.NumCPU()},
+		Runs:   len(runResults),
+		Faults: map[string]int{},
+	}
+	for _, r := range runResults {
+		s.PerRun = append(s.PerRun, r.summary())
 		if r.passed() {
-			passed++
+			s.Passed++
 		}
 		if r.setupErr != "" {
-			setupFailed++
+			s.SetupFailures++
 			continue
 		}
 		switch r.linearizable {
 		case porcupine.Illegal:
-			illegal++
+			s.LinearizabilityViolations++
 		case porcupine.Unknown:
-			unknown++
+			s.PorcupineTimeouts++
 		}
 		if !r.converged {
-			notConverged++
+			s.NotConverged++
 		}
 		if r.counterErr != "" {
-			counterBad++
+			s.CounterFailures++
 		}
 		if r.finalErr != "" {
-			finalBad++
+			s.FinalReadFailures++
 		}
-		ops += r.ops
-		acked += r.acked
-		ambiguous += r.ambiguous
-		readsOK += r.readsOK
-		readsFailed += r.readsFailed
-		for k, v := range r.faults {
-			faults[k] += v
+		s.Operations += r.ops
+		s.AcknowledgedWrites += r.acked
+		s.AmbiguousWrites += r.ambiguous
+		s.SuccessfulReads += r.readsOK
+		s.FailedReads += r.readsFailed
+		s.ConfirmedWritesChecked += r.confirmedChecked
+		s.LostConfirmedWrites += r.lostWrites
+		for kind, count := range r.faults {
+			s.Faults[kind] += count
+			s.TotalFaults += count
 		}
 	}
-	checked := len(results) - setupFailed
-	var fs []string
-	total := 0
-	for _, k := range sortedKeys(faults) {
-		fs = append(fs, fmt.Sprintf("%s %d", k, faults[k]))
-		total += faults[k]
+
+	checked := s.Runs - s.SetupFailures
+	var faultList []string
+	for _, kind := range sortedKeys(s.Faults) {
+		faultList = append(faultList, fmt.Sprintf("%s %d", kind, s.Faults[kind]))
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "==== QuorumDB chaos summary ====\n")
-	fmt.Fprintf(&b, "runs passed                 %d / %d\n", passed, len(results))
-	fmt.Fprintf(&b, "linearizability violations  %d   (porcupine: %d ok, %d illegal, %d timed out)\n", illegal, checked-illegal-unknown, illegal, unknown)
-	fmt.Fprintf(&b, "replicas converged          %d / %d\n", checked-notConverged, checked)
-	fmt.Fprintf(&b, "counter checks passed       %d / %d\n", checked-counterBad, checked)
-	fmt.Fprintf(&b, "operations recorded         %d\n", ops)
-	fmt.Fprintf(&b, "  acknowledged writes       %d\n", acked)
-	fmt.Fprintf(&b, "  ambiguous writes          %d   (timed out or failed; may or may not have applied)\n", ambiguous)
-	fmt.Fprintf(&b, "  successful reads          %d   (%d failed reads not recorded)\n", readsOK, readsFailed)
-	fmt.Fprintf(&b, "faults injected             %d   (%s)\n", total, strings.Join(fs, ", "))
+	fmt.Fprintf(&b, "runs passed                 %d / %d\n", s.Passed, s.Runs)
+	fmt.Fprintf(&b, "linearizability violations  %d   (porcupine: %d ok, %d illegal, %d timed out)\n",
+		s.LinearizabilityViolations, checked-s.LinearizabilityViolations-s.PorcupineTimeouts, s.LinearizabilityViolations, s.PorcupineTimeouts)
+	fmt.Fprintf(&b, "lost confirmed writes       %d   (of %d checked one by one: write-once keys read back, INCRs vs final counters)\n",
+		s.LostConfirmedWrites, s.ConfirmedWritesChecked)
+	fmt.Fprintf(&b, "replicas converged          %d / %d\n", checked-s.NotConverged, checked)
+	fmt.Fprintf(&b, "counter checks passed       %d / %d\n", checked-s.CounterFailures, checked)
+	fmt.Fprintf(&b, "operations recorded         %d\n", s.Operations)
+	fmt.Fprintf(&b, "  acknowledged writes       %d\n", s.AcknowledgedWrites)
+	fmt.Fprintf(&b, "  ambiguous writes          %d   (timed out or failed; may or may not have applied)\n", s.AmbiguousWrites)
+	fmt.Fprintf(&b, "  successful reads          %d   (%d failed reads not recorded)\n", s.SuccessfulReads, s.FailedReads)
+	fmt.Fprintf(&b, "faults injected             %d   (%s)\n", s.TotalFaults, strings.Join(faultList, ", "))
 	fmt.Fprintf(&b, "setup                       3 nodes, %d clients, %d registers + %d counters, %s of faults per run, snapshot every %d entries\n",
 		cfg.clients, cfg.registers, cfg.counters, cfg.duration, cfg.snapshotAt)
 	fmt.Fprintf(&b, "seed                        %d\n", cfg.seed)
-	fmt.Fprintf(&b, "host                        %s/%s, %d CPUs\n", runtime.GOOS, runtime.GOARCH, runtime.NumCPU())
+	fmt.Fprintf(&b, "host                        %s, %d CPUs\n", s.Client.OS, s.Client.CPUs)
 	fmt.Fprintf(&b, "wall time                   %s\n", elapsed.Round(time.Second))
 	if len(cfg.nodeFlags) > 0 {
 		fmt.Fprintf(&b, "node flags                  %s\n", strings.Join(cfg.nodeFlags, " "))
 	}
-	ok := passed == len(results) && len(results) == cfg.runs
-	return summary{
-		text:   b.String(),
-		passed: ok,
-		json: map[string]any{
-			"runs": len(results), "passed": passed, "linearizability_violations": illegal,
-			"porcupine_timeouts": unknown, "not_converged": notConverged, "counter_failures": counterBad,
-			"final_read_failures": finalBad, "setup_failures": setupFailed,
-			"operations": ops, "acknowledged_writes": acked, "ambiguous_writes": ambiguous,
-			"successful_reads": readsOK, "failed_reads": readsFailed, "faults": faults,
-			"clients": cfg.clients, "fault_seconds_per_run": cfg.duration.Seconds(), "seed": cfg.seed,
-			"node_flags": strings.Join(cfg.nodeFlags, " "), "wall_seconds": elapsed.Seconds(),
-		},
-	}
+	return summary{text: b.String(), json: s, passed: s.Passed == s.Runs && s.Runs == cfg.runs}
 }

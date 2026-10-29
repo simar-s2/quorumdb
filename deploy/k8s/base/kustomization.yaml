@@ -1,0 +1,7 @@
+# The QuorumDB database. Render with `kubectl kustomize deploy/k8s/base`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: quorumdb
+resources:
+- namespace.yaml
+- peers-service.yaml

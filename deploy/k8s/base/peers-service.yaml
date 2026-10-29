@@ -1,0 +1,21 @@
+# Headless Service (no cluster IP, no load balancing). It gives each StatefulSet pod a stable DNS
+# name, quorumdb-0.quorumdb-peers, that follows the pod to its new IP when it is recreated. Nodes use
+# these names in their peer list.
+apiVersion: v1
+kind: Service
+metadata:
+  name: quorumdb-peers
+  labels:
+    app: quorumdb
+spec:
+  clusterIP: None
+  # Publish DNS names for pods that are not ready yet. A node only becomes ready once it knows a
+  # leader, and it needs to reach its peers by name to elect one.
+  publishNotReadyAddresses: true
+  selector:
+    app: quorumdb
+  ports:
+  - name: raft
+    port: 7000
+  - name: redis
+    port: 6379

@@ -138,3 +138,38 @@ Raft first: the other two nodes still form a majority. If the dead node was the 
 
 **Why is readiness "knows a leader" and not just "process is up"?**
 Readiness decides who gets client traffic. A node with no leader (cut off from the majority, or mid-election) can neither commit writes nor serve linearizable reads, so routing clients there only produces timeouts. Liveness is the "process is up" check, and it is kept loose so Kubernetes does not restart nodes that are healthy but waiting for an election.
+
+## 3. Benchmarks
+
+### What was built
+
+- [`cmd/benchmark`](cmd/benchmark/main.go): asks each node for its Raft role, then runs the official `redis-benchmark` (`-t set,get -n 200000 -c 50 -r 100000 -d 3 --csv`) three times for each of three settings: the leader with no pipelining, the leader with 16 commands per round trip, and a follower with no pipelining. Each run is saved with the node it targeted and whether the leader changed during it.
+- `make bench` runs it in a container on the local Docker cluster's network and writes `results/local/benchmark.json`.
+- [`deploy/k8s/benchmark/`](deploy/k8s/benchmark/): a Job that runs the same tool on the tools node against the pods' DNS names. A read-only service account lets it record which zone and machine type each pod and the client ran on. `make gke-bench` runs it and saves `results/gke/benchmark.json`.
+- `cmd/results` (section 5) turns both files into the README table: the median of the three runs, with the range.
+
+### Why
+
+- **The client runs inside the cluster.** From a laptop, traffic would go through `kubectl port-forward` and the Kubernetes API server, and the benchmark would measure that tunnel. Inside the cluster, the client reaches pod IPs directly, as an application would.
+- **The same tool locally and on GKE.** Both columns of the table come from the same code, the same flags and the same `redis-benchmark` version (the one in the tools image), so the only differences are the machines and the network.
+- **Interleaved repeats.** Each repeat runs all three settings before the next repeat starts. If the disk warms up or the dataset grows during the session, every setting is affected equally rather than only the last one measured.
+- **Placement is recorded, not assumed.** The leader is whichever node won the last election, so whether the client and the leader share a zone changes between sessions. The JSON says where each one was.
+- **Results leave through the log.** The Job prints its JSON between marker lines at the end of its log, and the script cuts it out. No storage bucket, volume or `kubectl cp` is needed, and the log stays readable until the next run deletes the Job.
+
+### Tradeoffs
+
+- **One client machine.** With `-P 16`, the leader may answer faster than a single 2-vCPU client can send, so those rows can measure the client rather than the database.
+- **Closed-loop load.** `redis-benchmark` sends a new request only after the previous one is answered. When the server slows down, the offered load drops with it, so tail latency under a fixed request rate would be worse than these percentiles. This is often called coordinated omission.
+- **Three repeats.** Enough to see the spread, not enough for confidence intervals. The table shows the range, not a standard deviation.
+- **Shared-core VMs.** e2 machines share physical cores with other customers' VMs, so results can vary between sessions.
+
+### Interview questions
+
+**What limits write throughput on GKE?**
+Each write is acknowledged only after it is on disk on two of three nodes: the leader's own fsync, plus one follower's fsync and its reply across zones. Writes from many clients are batched into one AppendEntries and one fsync (group commit), so throughput depends on how many writes fit into one round of `fsync + cross-zone round trip`. That is why pipelining raises throughput so much.
+
+**Why are reads through a follower slower than through the leader?**
+A follower forwards every command to the leader over a second connection and relays the reply, which adds a network hop, usually across zones. On the leader, a read needs only a ReadIndex heartbeat round, with no disk write.
+
+**Why did you not just report the best run?**
+The best run hides variance, and the variance is real: shared VMs, network jitter, background snapshots. The median of three with the full range is honest about it, and the raw runs are in the JSON for anyone who wants to check.

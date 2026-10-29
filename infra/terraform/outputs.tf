@@ -11,3 +11,8 @@ output "zones" {
   description = "The three zones the QuorumDB nodes run in."
   value       = local.zones
 }
+
+output "get_credentials_command" {
+  description = "Points kubectl at the new cluster."
+  value       = "gcloud container clusters get-credentials ${google_container_cluster.quorumdb.name} --region ${var.region} --project ${var.project_id}"
+}

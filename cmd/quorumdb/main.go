@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -20,6 +22,7 @@ func main() {
 		id         = flag.String("id", "", "unique node ID (required)")
 		redisAddr  = flag.String("redis-addr", ":6379", "address for Redis clients")
 		raftAddr   = flag.String("raft-addr", ":7000", "address for peer (Raft) traffic")
+		httpAddr   = flag.String("http-addr", "", "address for the /healthz and /readyz endpoints, e.g. :8080 (off when empty)")
 		peers      = flag.String("peers", "", "comma-separated id=host:port for every member, e.g. n1=n1:7000,n2=n2:7000,n3=n3:7000")
 		dataDir    = flag.String("data", "./data", "directory for the write-ahead log and snapshots")
 		heartbeat  = flag.Duration("heartbeat", 50*time.Millisecond, "leader heartbeat interval")
@@ -71,6 +74,15 @@ func main() {
 	})
 	if err != nil {
 		fatal("starting node: %v", err)
+	}
+	if *httpAddr != "" {
+		healthListener, err := net.Listen("tcp", *httpAddr)
+		if err != nil {
+			fatal("health listener: %v", err)
+		}
+		healthServer := &http.Server{Handler: newHealthHandler(srv.Raft()), ReadHeaderTimeout: 5 * time.Second}
+		go healthServer.Serve(healthListener)
+		defer healthServer.Close()
 	}
 
 	sig := make(chan os.Signal, 1)

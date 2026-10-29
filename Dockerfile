@@ -18,5 +18,5 @@ RUN apk add --no-cache redis tini \
 COPY --from=build /out/quorumdb /usr/local/bin/quorumdb
 USER 10001
 VOLUME /data
-EXPOSE 6379 7000
+EXPOSE 6379 7000 8080
 ENTRYPOINT ["/sbin/tini", "--", "quorumdb"]

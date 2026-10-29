@@ -1,0 +1,36 @@
+# Runs cmd/benchmark once, from the tools node, against the three QuorumDB pods. The results are
+# printed at the end of the log as JSON, which scripts/gke-run-job.sh saves to results/gke/.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: quorumdb-benchmark
+spec:
+  # A failed benchmark should be looked at, not quietly retried.
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: quorumdb-benchmark
+      restartPolicy: Never
+      # The tools node, so the client does not take CPU from a database node.
+      nodeSelector:
+        cloud.google.com/gke-nodepool: tools
+      containers:
+      - name: benchmark
+        image: quorumdb-tools
+        command: [benchmark]
+        args:
+        - -environment=gke
+        - -description=GKE regional cluster, Dataplane V2, one db node per zone, pd-balanced disks
+        - -nodes=quorumdb-0=quorumdb-0.quorumdb-peers:6379,quorumdb-1=quorumdb-1.quorumdb-peers:6379,quorumdb-2=quorumdb-2.quorumdb-peers:6379
+        - -kubernetes-namespace=quorumdb
+        - -out=-
+        env:
+        # The node this pod runs on, so the results record the client's zone.
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        resources:
+          requests:
+            cpu: "1"
+            memory: 256Mi

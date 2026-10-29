@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds the server image for linux/amd64 (the CPU type of the GKE nodes) and pushes it to Artifact
-# Registry. The tag is the git commit, so a deploy always names the exact code it runs.
+# Builds the server and tools images for linux/amd64 (the CPU type of the GKE nodes) and pushes them
+# to Artifact Registry. The tag is the git commit, so a deploy always names the exact code it runs.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/gke-env.sh
@@ -15,8 +15,9 @@ fi
 gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
 
 docker buildx build --platform linux/amd64 --target server --tag "$REGISTRY/quorumdb:$tag" --push .
+docker buildx build --platform linux/amd64 --target tools --tag "$REGISTRY/tools:$tag" --push .
 
 # The deploy script reads the tag from here.
 mkdir -p .deploy
 echo "$tag" > .deploy/image-tag
-echo "pushed $REGISTRY/quorumdb:$tag"
+echo "pushed $REGISTRY/quorumdb:$tag and $REGISTRY/tools:$tag"

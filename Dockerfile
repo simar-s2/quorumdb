@@ -10,9 +10,16 @@ RUN for program in quorumdb benchmark chaos; do \
       CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/$program ./cmd/$program || exit 1; \
     done
 
-# The image for the benchmark and chaos clients: redis-benchmark plus the Go tools.
+# The image for the benchmark and chaos clients: redis-benchmark plus the Go tools, and kubectl,
+# which the chaos test uses to kill pods, freeze processes and apply NetworkPolicies.
 FROM alpine:3.22 AS tools
-RUN apk add --no-cache redis && adduser -D -H -u 10001 tools
+ARG TARGETARCH
+ARG KUBECTL_VERSION=v1.36.6
+RUN apk add --no-cache redis && adduser -D -H -u 10001 tools \
+    && wget -q -O /usr/local/bin/kubectl "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/$TARGETARCH/kubectl" \
+    && wget -q -O /tmp/kubectl.sha256 "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/$TARGETARCH/kubectl.sha256" \
+    && echo "$(cat /tmp/kubectl.sha256)  /usr/local/bin/kubectl" | sha256sum -c - \
+    && chmod +x /usr/local/bin/kubectl && rm /tmp/kubectl.sha256
 COPY --from=build /out/benchmark /out/chaos /usr/local/bin/
 USER 10001
 

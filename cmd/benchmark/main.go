@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/simar-s2/quorumdb/internal/kube"
 	"github.com/simar-s2/quorumdb/internal/resp"
 	"github.com/simar-s2/quorumdb/internal/results"
 )
@@ -45,6 +46,7 @@ func main() {
 		keyspace    = flag.Int("keyspace", 100000, "random keys are drawn from this many")
 		repeats     = flag.Int("repeats", 3, "runs of every setting")
 		outputPath  = flag.String("out", "-", "where to write the JSON results; - prints them to standard output")
+		namespace   = flag.String("kubernetes-namespace", "", "when running in Kubernetes: the namespace of the QuorumDB pods, to record their zones")
 	)
 	flag.Parse()
 
@@ -72,6 +74,9 @@ func main() {
 		},
 		Nodes:  nodes,
 		Client: results.Client{OS: runtime.GOOS + "/" + runtime.GOARCH, CPUs: runtime.NumCPU()},
+	}
+	if *namespace != "" {
+		recordPlacement(&file, *namespace)
 	}
 
 	// Each repeat runs every setting once, rather than all repeats of one setting back to back, so
@@ -114,6 +119,26 @@ func main() {
 
 	if err := results.Write(*outputPath, file); err != nil {
 		fatal("writing results: %v", err)
+	}
+}
+
+// recordPlacement saves which zone and machine type each node and this client ran on. The node IDs
+// are the pod names, and the Job passes the client's node name in NODE_NAME.
+func recordPlacement(file *results.Benchmark, namespace string) {
+	for i := range file.Nodes {
+		node, err := kube.NodeOfPod(namespace, file.Nodes[i].ID)
+		if err != nil {
+			fatal("%v", err)
+		}
+		if file.Nodes[i].Zone, file.Nodes[i].MachineType, err = kube.ZoneAndMachineType(node); err != nil {
+			fatal("%v", err)
+		}
+	}
+	if node := os.Getenv("NODE_NAME"); node != "" {
+		var err error
+		if file.Client.Zone, file.Client.MachineType, err = kube.ZoneAndMachineType(node); err != nil {
+			fatal("%v", err)
+		}
 	}
 }
 

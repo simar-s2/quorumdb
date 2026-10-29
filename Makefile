@@ -3,7 +3,7 @@ RUNS  ?= 100
 CHAOS_DURATION ?= 10s
 
 .PHONY: build test test-race vet cluster-up cluster-down cluster-status kill-leader bench chaos chaos-negative clean help \
-	gke-state-bucket up deploy down gke-status
+	gke-state-bucket up deploy down gke-status gke-bench
 
 build: ## Build the node binary and the chaos harness into ./bin
 	$(GO) build -o bin/quorumdb ./cmd/quorumdb
@@ -78,6 +78,9 @@ deploy: ## Build and push the image, then apply the Kubernetes manifests and wai
 
 gke-status: ## Show each GKE pod's zone, role, term and log position
 	@$(GKE_ENV) scripts/gke-status.sh
+
+gke-bench: ## Run the benchmark Job in the GKE cluster; saves results/gke/benchmark.json
+	$(GKE_ENV) scripts/gke-run-job.sh benchmark $(BENCH_FLAGS)
 
 down: ## Delete QuorumDB and its disks, then destroy everything Terraform created (asks first)
 	$(GKE_ENV) scripts/gke-down.sh

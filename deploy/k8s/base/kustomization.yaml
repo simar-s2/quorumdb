@@ -5,3 +5,4 @@ namespace: quorumdb
 resources:
 - namespace.yaml
 - peers-service.yaml
+- statefulset.yaml

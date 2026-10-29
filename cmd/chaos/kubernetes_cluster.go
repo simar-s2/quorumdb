@@ -66,14 +66,25 @@ func (c *kubernetesCluster) kill(i int) bool {
 // restart does nothing: the StatefulSet controller recreates a killed pod by itself.
 func (c *kubernetesCluster) restart(i int) {}
 
-// setFrozen is not supported yet.
-func (c *kubernetesCluster) setFrozen(i int, frozen bool) bool { return false }
+// setFrozen sends SIGSTOP or SIGCONT to the server process through kubectl exec. A frozen leader
+// still believes it leads, which tests that it cannot serve stale reads or lose writes. This is why
+// the image runs QuorumDB under tini: the kernel ignores SIGSTOP sent to a container's PID 1 from
+// inside the container, but quorumdb is tini's child, not PID 1.
+func (c *kubernetesCluster) setFrozen(i int, frozen bool) bool {
+	signal := "CONT"
+	if frozen {
+		signal = "STOP"
+	}
+	// If the server is not running, pidof prints nothing and kill fails, so this reports false.
+	_, err := c.exec(c.pods[i], "sh", "-c", "kill -"+signal+" $(pidof quorumdb)")
+	return err == nil
+}
 
 // linkModes is empty: cutting links is not supported yet, so the nemesis skips link faults.
 func (c *kubernetesCluster) linkModes() []netproxy.Mode                { return nil }
 func (c *kubernetesCluster) setLinks(links []link, mode netproxy.Mode) {}
 
-// healAll waits for every pod to be back and ready.
+// healAll resumes frozen nodes and waits for every pod to be back and ready.
 func (c *kubernetesCluster) healAll() {
 	if err := c.healAndWait(); err != nil {
 		fmt.Fprintf(os.Stderr, "chaos: %v\n", err)
@@ -81,6 +92,10 @@ func (c *kubernetesCluster) healAll() {
 }
 
 func (c *kubernetesCluster) healAndWait() error {
+	// A frozen pod never becomes ready, so resume every node first. SIGCONT to a running process does nothing.
+	for i := 0; i < nodeCount; i++ {
+		c.setFrozen(i, false)
+	}
 	return c.waitAllReady(5 * time.Minute)
 }
 

@@ -1,0 +1,42 @@
+# Runs the chaos suite from the tools node against the three QuorumDB pods, which must be deployed
+# with deploy/k8s/chaos-settings. The JSON summary is printed at the end of the log, and
+# scripts/gke-run-job.sh saves it to results/gke/chaos.json. Extra flags appended by that script
+# (such as -runs=5) override the ones here, because the last value of a flag wins.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: quorumdb-chaos
+spec:
+  # A failed suite should be looked at, not quietly retried.
+  backoffLimit: 0
+  # Stop after 6 hours even if something hangs, so the cluster is never left busy by accident.
+  activeDeadlineSeconds: 21600
+  template:
+    spec:
+      serviceAccountName: quorumdb-chaos
+      restartPolicy: Never
+      nodeSelector:
+        cloud.google.com/gke-nodepool: tools
+      containers:
+      - name: chaos
+        image: quorumdb-tools
+        command: [chaos]
+        args:
+        - -cluster=kubernetes
+        - -namespace=quorumdb
+        - -runs=100
+        - -out=/tmp/chaos-results
+        - -summary=-
+        # If a run fails, keep the pod (and the failed runs' histories) for an hour for kubectl cp.
+        - -keep-failures-for=1h
+        env:
+        # The node this pod runs on, so the summary records the client's zone.
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        resources:
+          requests:
+            cpu: "1"
+            # Porcupine's linearizability check of a run's history can use a few hundred MB.
+            memory: 1Gi

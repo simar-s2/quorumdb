@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -20,6 +22,7 @@ func main() {
 		id         = flag.String("id", "", "unique node ID (required)")
 		redisAddr  = flag.String("redis-addr", ":6379", "address for Redis clients")
 		raftAddr   = flag.String("raft-addr", ":7000", "address for peer (Raft) traffic")
+		httpAddr   = flag.String("http-addr", "", "address for the /healthz and /readyz endpoints, e.g. :8080 (off when empty)")
 		peers      = flag.String("peers", "", "comma-separated id=host:port for every member, e.g. n1=n1:7000,n2=n2:7000,n3=n3:7000")
 		dataDir    = flag.String("data", "./data", "directory for the write-ahead log and snapshots")
 		heartbeat  = flag.Duration("heartbeat", 50*time.Millisecond, "leader heartbeat interval")
@@ -32,6 +35,10 @@ func main() {
 		unsafeLocalReads = flag.Bool("unsafe-local-reads", false, "UNSAFE: serve reads from local state without ReadIndex (negative control for the chaos test)")
 		unsafeEarlyAck   = flag.Bool("unsafe-early-ack", false, "UNSAFE: acknowledge SET before it commits (negative control for the chaos test)")
 	)
+	// Kubernetes configures the node through environment variables; flags given on the command line still win.
+	if err := setFlagsFromEnvironment(flag.CommandLine); err != nil {
+		fatal("%v", err)
+	}
 	flag.Parse()
 
 	var level slog.Level
@@ -68,12 +75,41 @@ func main() {
 	if err != nil {
 		fatal("starting node: %v", err)
 	}
+	if *httpAddr != "" {
+		healthListener, err := net.Listen("tcp", *httpAddr)
+		if err != nil {
+			fatal("health listener: %v", err)
+		}
+		healthServer := &http.Server{Handler: newHealthHandler(srv.Raft()), ReadHeaderTimeout: 5 * time.Second}
+		go healthServer.Serve(healthListener)
+		defer healthServer.Close()
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	s := <-sig
 	logger.Info("shutting down", "signal", s.String())
 	srv.Close()
+}
+
+// setFlagsFromEnvironment sets each flag from QUORUMDB_<NAME>, e.g. -raft-addr from QUORUMDB_RAFT_ADDR.
+func setFlagsFromEnvironment(flags *flag.FlagSet) error {
+	var firstError error
+	flags.VisitAll(func(f *flag.Flag) {
+		environmentName := environmentVariableFor(f.Name)
+		value, isSet := os.LookupEnv(environmentName)
+		if !isSet || firstError != nil {
+			return
+		}
+		if err := flags.Set(f.Name, value); err != nil {
+			firstError = fmt.Errorf("bad %s=%q: %v", environmentName, value, err)
+		}
+	})
+	return firstError
+}
+
+func environmentVariableFor(flagName string) string {
+	return "QUORUMDB_" + strings.ToUpper(strings.ReplaceAll(flagName, "-", "_"))
 }
 
 func parsePeers(s string) (map[string]string, error) {

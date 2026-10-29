@@ -1,0 +1,49 @@
+# The benchmark only reads: which node each QuorumDB pod is on, and that node's zone and machine type.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: quorumdb-benchmark
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: quorumdb-benchmark
+rules:
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: quorumdb-benchmark
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: quorumdb-benchmark
+subjects:
+- kind: ServiceAccount
+  name: quorumdb-benchmark
+---
+# Nodes are not in a namespace, so reading them needs a ClusterRole.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: quorumdb-benchmark-read-nodes
+rules:
+- apiGroups: [""]
+  resources: [nodes]
+  verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: quorumdb-benchmark-read-nodes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: quorumdb-benchmark-read-nodes
+subjects:
+- kind: ServiceAccount
+  name: quorumdb-benchmark
+  namespace: quorumdb

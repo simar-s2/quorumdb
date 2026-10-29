@@ -1,0 +1,63 @@
+# What the chaos test may do, and only in the quorumdb namespace: read and delete pods, run commands
+# in them (kill -9, kill -STOP), read their logs, read the StatefulSet's settings, and create and
+# delete NetworkPolicies to cut links between pods.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: quorumdb-chaos
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: quorumdb-chaos
+rules:
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [get, list, delete]
+- apiGroups: [""]
+  resources: [pods/exec]
+  verbs: [create]
+- apiGroups: [""]
+  resources: [pods/log]
+  verbs: [get]
+- apiGroups: [apps]
+  resources: [statefulsets]
+  verbs: [get]
+- apiGroups: [networking.k8s.io]
+  resources: [networkpolicies]
+  verbs: [get, list, create, patch, update, delete, deletecollection]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: quorumdb-chaos
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: quorumdb-chaos
+subjects:
+- kind: ServiceAccount
+  name: quorumdb-chaos
+---
+# To record each pod's zone and machine type. Nodes are not in a namespace, so this is a ClusterRole.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: quorumdb-chaos-read-nodes
+rules:
+- apiGroups: [""]
+  resources: [nodes]
+  verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: quorumdb-chaos-read-nodes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: quorumdb-chaos-read-nodes
+subjects:
+- kind: ServiceAccount
+  name: quorumdb-chaos
+  namespace: quorumdb

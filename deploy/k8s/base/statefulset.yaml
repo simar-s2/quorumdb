@@ -1,0 +1,115 @@
+# Three QuorumDB nodes: quorumdb-0, quorumdb-1 and quorumdb-2. A StatefulSet (not a Deployment)
+# gives each pod a fixed name, a fixed DNS name and its own disk that follows it when it restarts.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: quorumdb
+  labels:
+    app: quorumdb
+spec:
+  serviceName: quorumdb-peers
+  replicas: 3
+  # Start all three pods at once. The default (OrderedReady) creates quorumdb-1 only after
+  # quorumdb-0 is ready, but no node is ready until two of them have elected a leader.
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: quorumdb
+  template:
+    metadata:
+      labels:
+        app: quorumdb
+    spec:
+      # Only the database node pool; the tools node runs the benchmark and chaos clients.
+      nodeSelector:
+        cloud.google.com/gke-nodepool: db
+      # One pod per zone: the zone with the most QuorumDB pods may have at most one more than the zone
+      # with the fewest. With three pods and three zones that means exactly one each, so losing a zone
+      # costs one node and the other two still form a majority. DoNotSchedule leaves a pod pending
+      # rather than doubling up a zone.
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: quorumdb
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        # Kubernetes makes the volume writable by this group, so the non-root process can use it.
+        fsGroup: 10001
+      containers:
+      - name: quorumdb
+        image: quorumdb
+        ports:
+        - name: redis
+          containerPort: 6379
+        - name: raft
+          containerPort: 7000
+        - name: http
+          containerPort: 8080
+        env:
+        # The node ID is the pod name: quorumdb-0, quorumdb-1 or quorumdb-2.
+        - name: QUORUMDB_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        # Every member, by its stable DNS name. Raft membership is fixed, so this list never changes.
+        - name: QUORUMDB_PEERS
+          value: quorumdb-0=quorumdb-0.quorumdb-peers:7000,quorumdb-1=quorumdb-1.quorumdb-peers:7000,quorumdb-2=quorumdb-2.quorumdb-peers:7000
+        - name: QUORUMDB_DATA
+          value: /data
+        - name: QUORUMDB_HTTP_ADDR
+          value: ":8080"
+        # The health server starts after the node has replayed its log, so allow up to 5 minutes.
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 2
+          failureThreshold: 150
+        # Restart the container if the process stops answering for 30 s. The chaos test freezes a
+        # node for at most a few seconds, which this tolerates.
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        # Ready = knows the current leader. A node without one (election running, or cut off from
+        # the majority) is taken out of the client Service until it finds one again.
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: http
+          periodSeconds: 2
+          failureThreshold: 2
+        resources:
+          requests:
+            cpu: "1"
+            memory: 1Gi
+          # No CPU limit: CFS throttling would pause the process for whole scheduler periods and
+          # delay heartbeats. The memory limit stops a runaway node from taking down its machine.
+          limits:
+            memory: 2Gi
+        volumeMounts:
+        - name: data
+          mountPath: /data
+  # One PersistentVolumeClaim per pod (data-quorumdb-0, ...), holding its write-ahead log and
+  # snapshots. GKE creates a zonal persistent disk the first time the pod is scheduled, and from then
+  # on the pod can only run in that zone.
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      # Only one pod may use the disk at a time, so two copies of a node can never write the same log.
+      accessModes:
+      - ReadWriteOncePod
+      storageClassName: standard-rwo
+      resources:
+        requests:
+          storage: 10Gi

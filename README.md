@@ -128,6 +128,28 @@ make build
   -peers n1=host1:7000,n2=host2:7000,n3=host3:7000 -data ./data/n1
 ```
 
+## Deploy to GKE (three zones)
+
+Terraform creates a regional GKE cluster with one `e2-standard-2` database node in each of three zones, plus one node for the benchmark and chaos clients. Kubernetes runs QuorumDB as a 3-replica StatefulSet with one pod per zone. [DESIGN.md](DESIGN.md) explains each piece.
+
+**This creates billed resources.** Run `make down` when you are done (see [Cost and teardown](DESIGN.md#cost-and-teardown)).
+
+You need `gcloud`, `terraform` (1.6+), `kubectl` with `gke-gcloud-auth-plugin`, and Docker with `buildx`.
+
+```bash
+gcloud auth login                         # for gcloud and docker push
+gcloud auth application-default login     # Terraform uses these credentials
+gcloud config set project <your-project-id>
+gcloud components install gke-gcloud-auth-plugin   # lets kubectl log in to GKE
+
+make gke-state-bucket   # one time: a GCS bucket for the Terraform state
+make up                 # terraform apply (shows the plan and asks), then build, push and deploy
+make gke-status         # zone, role and term of each pod
+make down               # delete QuorumDB and its disks, then terraform destroy (asks first)
+```
+
+The region is a variable: `make up REGION=europe-west1` (the default is `us-west1`). After a code change, `make deploy` rebuilds the image, tags it with the git commit, and rolls it out one pod at a time.
+
 ## Supported commands
 
 | Command | Notes |
@@ -167,7 +189,7 @@ Measured with the official `redis-benchmark` against the Docker cluster. Each ro
 - **Hardware:** MacBook Pro, Apple M1 Pro (10 cores), 32 GB RAM, macOS 26.6.2, on AC power. Docker Desktop 28.3.3, VM with 10 CPUs and 7.7 GiB RAM. All three nodes and the benchmark client share this one machine.
 - **Cluster:** `make cluster-up` with default settings: fsync on, 50 ms heartbeats, 300 ms election timeout, snapshot every 10,000 entries.
 - **Client:** redis-benchmark 8.10.2, run in a container on the cluster's Docker network so Docker Desktop's port forwarding is not measured. 200,000 requests, 50 parallel clients, random keys from a 100,000-key space, 3-byte values.
-- **Commands:** `make bench` runs `redis-benchmark -h <leader> -p 6379 -t set,get -n 200000 -c 50 -P 1 -r 100000 --csv`. `make bench PIPELINE=16` gives the pipelined rows and `make bench TARGET=follower` the follower rows.
+- **Commands:** `make bench` runs `redis-benchmark -t set,get -n 200000 -c 50 -r 100000 -d 3 --csv` three times against the leader with `-P 1` and `-P 16` and against a follower with `-P 1`, and saves every run to `results/local/benchmark.json`.
 
 ![redis-benchmark against the leader](docs/images/benchmark.gif)
 

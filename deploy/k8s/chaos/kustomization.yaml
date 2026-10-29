@@ -1,0 +1,7 @@
+# The chaos test Job and its permissions. scripts/gke-run-job.sh applies it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: quorumdb
+resources:
+- rbac.yaml
+- job.yaml

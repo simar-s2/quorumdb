@@ -1,0 +1,3 @@
+# Copy to terraform.tfvars, or let `make up` pass these from PROJECT_ID and REGION.
+project_id = "my-gcp-project"
+region     = "us-west1"

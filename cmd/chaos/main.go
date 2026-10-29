@@ -3,17 +3,14 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"math/rand/v2"
-	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,11 +20,13 @@ import (
 
 	"github.com/anishathalye/porcupine"
 	"github.com/simar-s2/quorumdb/internal/chaos"
-	"github.com/simar-s2/quorumdb/internal/netproxy"
-	"github.com/simar-s2/quorumdb/internal/resp"
+	"github.com/simar-s2/quorumdb/internal/results"
 )
 
 type config struct {
+	clusterKind  string // "local" or "kubernetes"
+	namespace    string
+	environment  string
 	bin          string
 	runs         int
 	duration     time.Duration
@@ -36,6 +35,8 @@ type config struct {
 	counters     int
 	seed         uint64
 	out          string
+	summaryPath  string
+	keepFailures time.Duration
 	snapshotAt   int
 	checkTimeout time.Duration
 	nodeFlags    []string
@@ -44,7 +45,10 @@ type config struct {
 func main() {
 	var cfg config
 	var nodeFlags string
-	flag.StringVar(&cfg.bin, "bin", "./bin/quorumdb", "path to the quorumdb binary")
+	flag.StringVar(&cfg.clusterKind, "cluster", "local", "local: start the nodes as processes here; kubernetes: test the QuorumDB pods (run from a pod in the cluster)")
+	flag.StringVar(&cfg.namespace, "namespace", "quorumdb", "with -cluster kubernetes: the namespace of the QuorumDB StatefulSet")
+	flag.StringVar(&cfg.environment, "environment", "", "label saved in the summary (default local, or gke with -cluster kubernetes)")
+	flag.StringVar(&cfg.bin, "bin", "./bin/quorumdb", "with -cluster local: path to the quorumdb binary")
 	flag.IntVar(&cfg.runs, "runs", 100, "number of independent runs")
 	flag.DurationVar(&cfg.duration, "duration", 10*time.Second, "how long faults are injected in each run")
 	flag.IntVar(&cfg.clients, "clients", 8, "concurrent clients")
@@ -52,6 +56,8 @@ func main() {
 	flag.IntVar(&cfg.counters, "counters", 2, "counter keys (INCR/GET)")
 	flag.Uint64Var(&cfg.seed, "seed", 0, "random seed (0 = time based)")
 	flag.StringVar(&cfg.out, "out", "chaos-results", "directory for the summary and for logs of failed runs")
+	flag.StringVar(&cfg.summaryPath, "summary", "", "where to write the JSON summary (default <out>/summary.json; - prints it)")
+	flag.DurationVar(&cfg.keepFailures, "keep-failures-for", 0, "if a run fails, wait this long before exiting, so a Kubernetes pod stays up for kubectl cp")
 	flag.IntVar(&cfg.snapshotAt, "snapshot-threshold", 200, "node snapshot threshold; small so snapshots and InstallSnapshot happen often")
 	flag.DurationVar(&cfg.checkTimeout, "check-timeout", 2*time.Minute, "porcupine time budget per run")
 	flag.StringVar(&nodeFlags, "node-flags", "", "extra flags for every node, space separated (e.g. -unsafe-local-reads)")
@@ -60,41 +66,82 @@ func main() {
 		cfg.seed = uint64(time.Now().UnixNano())
 	}
 	cfg.nodeFlags = strings.Fields(nodeFlags)
-	if _, err := os.Stat(cfg.bin); err != nil {
-		fatalf("node binary %s not found; run `make build` first", cfg.bin)
+
+	// newCluster gives each run its cluster: three fresh processes, or the shared Kubernetes pods.
+	var newCluster func(dir string) (cluster, error)
+	switch cfg.clusterKind {
+	case "local":
+		if _, err := os.Stat(cfg.bin); err != nil {
+			fatalf("node binary %s not found; run `make build` first", cfg.bin)
+		}
+		newCluster = func(dir string) (cluster, error) {
+			c, err := startLocalCluster(cfg, dir)
+			if err != nil {
+				return nil, err
+			}
+			return c, nil
+		}
+	case "kubernetes":
+		if len(cfg.nodeFlags) > 0 {
+			fatalf("-node-flags only works with -cluster local")
+		}
+		if err := checkKubernetesSettings(cfg.namespace, cfg.snapshotAt); err != nil {
+			fatalf("%v", err)
+		}
+		newCluster = func(string) (cluster, error) {
+			c, err := connectKubernetesCluster(cfg.namespace)
+			if err != nil {
+				return nil, err
+			}
+			return c, nil
+		}
+	default:
+		fatalf("-cluster must be local or kubernetes, not %q", cfg.clusterKind)
+	}
+	if cfg.environment == "" {
+		cfg.environment = map[string]string{"local": "local", "kubernetes": "gke"}[cfg.clusterKind]
 	}
 	if err := os.MkdirAll(cfg.out, 0o755); err != nil {
 		fatalf("%v", err)
+	}
+	if cfg.summaryPath == "" {
+		cfg.summaryPath = filepath.Join(cfg.out, "summary.json")
 	}
 
 	interrupted := make(chan os.Signal, 1)
 	signal.Notify(interrupted, os.Interrupt, syscall.SIGTERM)
 
-	fmt.Printf("QuorumDB chaos test: %d runs x %s of faults, 3 nodes, %d clients, seed %d\n",
-		cfg.runs, cfg.duration, cfg.clients, cfg.seed)
+	fmt.Printf("QuorumDB chaos test: %d runs x %s of faults, 3 nodes (%s), %d clients, seed %d\n",
+		cfg.runs, cfg.duration, cfg.clusterKind, cfg.clients, cfg.seed)
 	if len(cfg.nodeFlags) > 0 {
 		fmt.Printf("node flags: %s\n", strings.Join(cfg.nodeFlags, " "))
 	}
 	fmt.Println()
 
-	var results []*runResult
+	var runResults []*runResult
 	start := time.Now()
 	for i := 1; i <= cfg.runs; i++ {
-		res := runOnce(cfg, i, interrupted)
-		results = append(results, res)
+		res := runOnce(cfg, i, newCluster, interrupted)
+		runResults = append(runResults, res)
 		fmt.Println(res.line(cfg.runs))
 		if res.interrupted {
 			break
 		}
 	}
-	s := summarize(cfg, results, time.Since(start))
+	s := summarize(cfg, runResults, start)
 	fmt.Println()
 	fmt.Print(s.text)
 	os.WriteFile(filepath.Join(cfg.out, "summary.txt"), []byte(s.text), 0o644)
-	if b, err := json.MarshalIndent(s.json, "", "  "); err == nil {
-		os.WriteFile(filepath.Join(cfg.out, "summary.json"), b, 0o644)
+	if err := results.Write(cfg.summaryPath, s.json); err != nil {
+		fmt.Fprintf(os.Stderr, "chaos: writing the summary: %v\n", err)
 	}
 	if !s.passed {
+		if cfg.keepFailures > 0 {
+			// In Kubernetes, HOSTNAME is the pod's name.
+			fmt.Printf("\nsome runs failed; their histories and logs are in %s. Copy them within %s with:\n  kubectl -n %s cp %s:%s ./chaos-failures\n",
+				cfg.out, cfg.keepFailures, cfg.namespace, os.Getenv("HOSTNAME"), cfg.out)
+			time.Sleep(cfg.keepFailures)
+		}
 		os.Exit(1)
 	}
 }
@@ -102,541 +149,6 @@ func main() {
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "chaos: "+format+"\n", args...)
 	os.Exit(2)
-}
-
-// --- Cluster processes ---
-
-type node struct {
-	id        string
-	redisAddr string
-	args      []string
-	logPath   string
-
-	mu     sync.Mutex
-	cmd    *exec.Cmd
-	exited chan struct{}
-	paused bool
-}
-
-func (n *node) start() error {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	logf, err := os.OpenFile(n.logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	cmd := exec.Command(n.args[0], n.args[1:]...)
-	cmd.Stdout, cmd.Stderr = logf, logf
-	if err := cmd.Start(); err != nil {
-		logf.Close()
-		return err
-	}
-	exited := make(chan struct{})
-	go func() { cmd.Wait(); logf.Close(); close(exited) }()
-	n.cmd, n.exited, n.paused = cmd, exited, false
-	return nil
-}
-
-func (n *node) alive() bool {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.cmd == nil {
-		return false
-	}
-	select {
-	case <-n.exited:
-		return false
-	default:
-		return true
-	}
-}
-
-// kill sends SIGKILL, so nothing gets flushed or shut down cleanly.
-func (n *node) kill() {
-	n.mu.Lock()
-	cmd, exited := n.cmd, n.exited
-	n.cmd = nil
-	n.mu.Unlock()
-	if cmd == nil {
-		return
-	}
-	cmd.Process.Signal(syscall.SIGCONT)
-	cmd.Process.Kill()
-	<-exited
-}
-
-func (n *node) setPaused(p bool) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.cmd == nil || n.paused == p {
-		return
-	}
-	sig := syscall.SIGCONT
-	if p {
-		sig = syscall.SIGSTOP
-	}
-	n.cmd.Process.Signal(sig)
-	n.paused = p
-}
-
-type cluster struct {
-	nodes   []*node
-	proxies [3][3]*netproxy.Proxy // proxies[a][b] carries a's traffic to b
-}
-
-func freePort() (string, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return "", err
-	}
-	defer ln.Close()
-	return ln.Addr().String(), nil
-}
-
-func startCluster(cfg config, dir string) (*cluster, error) {
-	c := &cluster{}
-	var redis, raft [3]string
-	for i := 0; i < 3; i++ {
-		var err error
-		if redis[i], err = freePort(); err != nil {
-			return nil, err
-		}
-		if raft[i], err = freePort(); err != nil {
-			return nil, err
-		}
-	}
-	for a := 0; a < 3; a++ {
-		for b := 0; b < 3; b++ {
-			if a == b {
-				continue
-			}
-			p, err := netproxy.Listen("127.0.0.1:0", raft[b])
-			if err != nil {
-				c.stop()
-				return nil, err
-			}
-			c.proxies[a][b] = p
-		}
-	}
-	for i := 0; i < 3; i++ {
-		var peers []string
-		for j := 0; j < 3; j++ {
-			addr := raft[j]
-			if j != i {
-				addr = c.proxies[i][j].Addr()
-			}
-			peers = append(peers, fmt.Sprintf("n%d=%s", j+1, addr))
-		}
-		args := []string{cfg.bin,
-			"-id", fmt.Sprintf("n%d", i+1),
-			"-redis-addr", redis[i],
-			"-raft-addr", raft[i],
-			"-peers", strings.Join(peers, ","),
-			"-data", filepath.Join(dir, fmt.Sprintf("n%d", i+1)),
-			"-heartbeat", "50ms",
-			"-election-timeout", "300ms",
-			"-snapshot-threshold", strconv.Itoa(cfg.snapshotAt),
-			"-command-timeout", "2s",
-		}
-		args = append(args, cfg.nodeFlags...)
-		n := &node{id: fmt.Sprintf("n%d", i+1), redisAddr: redis[i], args: args, logPath: filepath.Join(dir, fmt.Sprintf("n%d.log", i+1))}
-		c.nodes = append(c.nodes, n)
-		if err := n.start(); err != nil {
-			c.stop()
-			return nil, err
-		}
-	}
-	return c, nil
-}
-
-func (c *cluster) stop() {
-	for _, n := range c.nodes {
-		n.kill()
-	}
-	for a := range c.proxies {
-		for b := range c.proxies[a] {
-			if p := c.proxies[a][b]; p != nil {
-				p.Close()
-			}
-		}
-	}
-}
-
-// healAll heals every link, resumes paused nodes and restarts dead ones.
-func (c *cluster) healAll() {
-	for a := range c.proxies {
-		for b := range c.proxies[a] {
-			if p := c.proxies[a][b]; p != nil {
-				p.SetMode(netproxy.Pass)
-			}
-		}
-	}
-	for _, n := range c.nodes {
-		if n.alive() {
-			n.setPaused(false)
-		} else {
-			n.start()
-		}
-	}
-}
-
-// query sends one command to a node with a short timeout.
-func query(addr string, timeout time.Duration, args ...string) (resp.Value, error) {
-	conn, err := net.DialTimeout("tcp", addr, timeout)
-	if err != nil {
-		return resp.Value{}, err
-	}
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(timeout))
-	if _, err := conn.Write(resp.AppendCommand(nil, args...)); err != nil {
-		return resp.Value{}, err
-	}
-	return resp.NewReader(conn).ReadReply()
-}
-
-func infoField(info, field string) string {
-	for _, line := range strings.Split(info, "\r\n") {
-		if v, ok := strings.CutPrefix(line, field+":"); ok {
-			return v
-		}
-	}
-	return ""
-}
-
-// leader returns the index of the node leading with the highest term, or -1.
-func (c *cluster) leader() int {
-	best, bestTerm := -1, -1
-	for i, n := range c.nodes {
-		if !n.alive() {
-			continue
-		}
-		v, err := query(n.redisAddr, 200*time.Millisecond, "INFO", "raft")
-		if err != nil {
-			continue
-		}
-		term, _ := strconv.Atoi(infoField(v.Str, "term"))
-		if infoField(v.Str, "role") == "leader" && term > bestTerm {
-			best, bestTerm = i, term
-		}
-	}
-	return best
-}
-
-func (c *cluster) waitLeader(timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if c.leader() >= 0 {
-			return true
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	return false
-}
-
-// waitConverged waits until all nodes report the same applied index and state digest.
-func (c *cluster) waitConverged(timeout time.Duration) (bool, string) {
-	deadline := time.Now().Add(timeout)
-	last := ""
-	for time.Now().Before(deadline) {
-		var applied, digests []string
-		for _, n := range c.nodes {
-			info, err1 := query(n.redisAddr, 500*time.Millisecond, "INFO", "raft")
-			dig, err2 := query(n.redisAddr, 500*time.Millisecond, "DEBUG", "DIGEST")
-			if err1 != nil || err2 != nil {
-				applied = append(applied, "?")
-				digests = append(digests, "?")
-				continue
-			}
-			applied = append(applied, infoField(info.Str, "last_applied"))
-			digests = append(digests, dig.Str)
-		}
-		last = fmt.Sprintf("applied=%v digests=%v", applied, digests)
-		if applied[0] != "?" && applied[0] == applied[1] && applied[1] == applied[2] &&
-			digests[0] == digests[1] && digests[1] == digests[2] {
-			return true, last
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return false, last
-}
-
-// --- Clients ---
-
-type recorder struct {
-	start time.Time
-	mu    sync.Mutex
-	ops   []porcupine.Operation
-
-	acked, ambiguous, readsOK, readsFailed int
-	ackedIncr, ambiguousIncr               map[string]int
-}
-
-func (r *recorder) now() int64 { return time.Since(r.start).Nanoseconds() }
-
-// pending marks an operation with an unknown outcome; it gets a return time after the history ends.
-const pending = int64(-1)
-
-func (r *recorder) record(client int, in chaos.Input, call, ret int64, out chaos.Output) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.ops = append(r.ops, porcupine.Operation{ClientId: client, Input: in, Call: call, Output: out, Return: ret})
-	switch {
-	case !in.Op.IsWrite():
-		r.readsOK++
-	case out.Unknown:
-		r.ambiguous++
-		if in.Op == chaos.OpIncr {
-			r.ambiguousIncr[in.Key]++
-		}
-	default:
-		r.acked++
-		if in.Op == chaos.OpIncr && out.Err == "" {
-			r.ackedIncr[in.Key]++
-		}
-	}
-}
-
-func (r *recorder) failedRead() {
-	r.mu.Lock()
-	r.readsFailed++
-	r.mu.Unlock()
-}
-
-type client struct {
-	id   int
-	c    *cluster
-	rng  *rand.Rand
-	rec  *recorder
-	conn net.Conn
-	rd   *resp.Reader
-	seq  int
-}
-
-func (cl *client) close() {
-	if cl.conn != nil {
-		cl.conn.Close()
-		cl.conn = nil
-	}
-}
-
-func (cl *client) send(timeout time.Duration, args ...string) (resp.Value, error) {
-	if cl.conn == nil {
-		n := cl.c.nodes[cl.rng.IntN(len(cl.c.nodes))]
-		conn, err := net.DialTimeout("tcp", n.redisAddr, 300*time.Millisecond)
-		if err != nil {
-			return resp.Value{}, errNotSent
-		}
-		cl.conn, cl.rd = conn, resp.NewReader(conn)
-	}
-	cl.conn.SetDeadline(time.Now().Add(timeout))
-	if _, err := cl.conn.Write(resp.AppendCommand(nil, args...)); err != nil {
-		cl.close()
-		return resp.Value{}, err
-	}
-	v, err := cl.rd.ReadReply()
-	if err != nil {
-		cl.close()
-	}
-	return v, err
-}
-
-// errNotSent means the client could not connect, so the operation never happened.
-var errNotSent = errors.New("not sent")
-
-// do runs one operation and records it in the history.
-func (cl *client) do(in chaos.Input) bool {
-	args := []string{strings.ToUpper(in.Op.String()), in.Key}
-	if in.Op == chaos.OpSet {
-		args = append(args, in.Value)
-	}
-	call := cl.rec.now()
-	v, err := cl.send(3*time.Second, args...)
-	ret := cl.rec.now()
-	if errors.Is(err, errNotSent) {
-		return false
-	}
-
-	if !in.Op.IsWrite() {
-		if err != nil || v.IsError() {
-			cl.rec.failedRead()
-			if err == nil {
-				cl.close() // try another node next time
-			}
-			return false
-		}
-		cl.rec.record(cl.id, in, call, ret, chaos.Output{Exists: !v.Null, Value: v.Str})
-		return true
-	}
-
-	var out chaos.Output
-	switch {
-	case err != nil:
-		out.Unknown = true
-	case v.IsError() && in.Op == chaos.OpIncr && strings.Contains(v.Str, "not an integer"):
-		out.Err = v.Str
-	case v.IsError():
-		// TIMEOUT / TRYAGAIN / CLUSTERDOWN: may or may not have executed.
-		out.Unknown = true
-		cl.close()
-	case in.Op == chaos.OpSet:
-		if v.Str != "OK" {
-			out.Unknown = true
-		}
-	default:
-		out.Int = v.Int
-	}
-	if out.Unknown {
-		ret = pending
-	}
-	cl.rec.record(cl.id, in, call, ret, out)
-	return !out.Unknown
-}
-
-func (cl *client) run(cfg config, stop <-chan struct{}) {
-	defer cl.close()
-	for {
-		select {
-		case <-stop:
-			return
-		default:
-		}
-		var in chaos.Input
-		reg := fmt.Sprintf("r%d", cl.rng.IntN(cfg.registers))
-		ctr := fmt.Sprintf("c%d", cl.rng.IntN(cfg.counters))
-		switch p := cl.rng.IntN(100); {
-		case p < 40:
-			cl.seq++
-			in = chaos.Input{Op: chaos.OpSet, Key: reg, Value: fmt.Sprintf("%d-%d", cl.id, cl.seq)}
-		case p < 72:
-			in = chaos.Input{Op: chaos.OpGet, Key: reg}
-		case p < 78:
-			in = chaos.Input{Op: chaos.OpDel, Key: reg}
-		case p < 92:
-			in = chaos.Input{Op: chaos.OpIncr, Key: ctr}
-		default:
-			in = chaos.Input{Op: chaos.OpGet, Key: ctr}
-		}
-		if !cl.do(in) {
-			time.Sleep(time.Duration(5+cl.rng.IntN(20)) * time.Millisecond)
-		}
-	}
-}
-
-// --- Nemesis ---
-
-type nemesis struct {
-	c      *cluster
-	rng    *rand.Rand
-	counts map[string]int
-	events []string
-	start  time.Time
-}
-
-func (nm *nemesis) logf(format string, args ...any) {
-	nm.events = append(nm.events, fmt.Sprintf("%6.2fs  %s", time.Since(nm.start).Seconds(), fmt.Sprintf(format, args...)))
-}
-
-// target picks the leader half the time and a random node otherwise.
-func (nm *nemesis) target() int {
-	if nm.rng.IntN(2) == 0 {
-		if l := nm.c.leader(); l >= 0 {
-			return l
-		}
-	}
-	return nm.rng.IntN(3)
-}
-
-func (nm *nemesis) linkMode() netproxy.Mode {
-	if nm.rng.IntN(2) == 0 {
-		return netproxy.Reset
-	}
-	return netproxy.Drop
-}
-
-func (nm *nemesis) cut(a, b int, m netproxy.Mode) { nm.c.proxies[a][b].SetMode(m) }
-
-// inject applies one random fault and returns the function that heals it.
-func (nm *nemesis) inject() func() {
-	n := nm.target()
-	node := nm.c.nodes[n]
-	switch kind := nm.rng.IntN(6); kind {
-	case 0:
-		if !node.alive() {
-			return func() {}
-		}
-		nm.counts["kill"]++
-		nm.logf("kill -9 %s", node.id)
-		node.kill()
-		return func() { nm.logf("restart %s", node.id); node.start() }
-	case 1:
-		if !node.alive() {
-			return func() {}
-		}
-		nm.counts["pause"]++
-		nm.logf("pause (SIGSTOP) %s", node.id)
-		node.setPaused(true)
-		return func() { nm.logf("resume %s", node.id); node.setPaused(false) }
-	case 2:
-		m := nm.linkMode()
-		nm.counts["isolate"]++
-		nm.logf("isolate %s (%s)", node.id, m)
-		for o := 0; o < 3; o++ {
-			if o != n {
-				nm.cut(n, o, m)
-				nm.cut(o, n, m)
-			}
-		}
-		return func() {
-			nm.logf("heal %s", node.id)
-			for o := 0; o < 3; o++ {
-				if o != n {
-					nm.cut(n, o, netproxy.Pass)
-					nm.cut(o, n, netproxy.Pass)
-				}
-			}
-		}
-	case 3:
-		// Bridge: two nodes lose each other but both still reach the third.
-		o := (n + 1 + nm.rng.IntN(2)) % 3
-		m := nm.linkMode()
-		nm.counts["bridge"]++
-		nm.logf("cut n%d <-> n%d (%s)", n+1, o+1, m)
-		nm.cut(n, o, m)
-		nm.cut(o, n, m)
-		return func() {
-			nm.logf("heal n%d <-> n%d", n+1, o+1)
-			nm.cut(n, o, netproxy.Pass)
-			nm.cut(o, n, netproxy.Pass)
-		}
-	default:
-		// One-way link failure, in either direction relative to the target.
-		o := (n + 1 + nm.rng.IntN(2)) % 3
-		from, to := n, o
-		if kind == 5 {
-			from, to = o, n
-		}
-		m := nm.linkMode()
-		nm.counts["one-way"]++
-		nm.logf("cut n%d -> n%d (%s)", from+1, to+1, m)
-		nm.cut(from, to, m)
-		return func() { nm.logf("heal n%d -> n%d", from+1, to+1); nm.cut(from, to, netproxy.Pass) }
-	}
-}
-
-func (nm *nemesis) run(d time.Duration) {
-	end := time.Now().Add(d)
-	for time.Now().Before(end) {
-		time.Sleep(time.Duration(200+nm.rng.IntN(600)) * time.Millisecond)
-		heals := []func(){nm.inject()}
-		if nm.rng.IntN(4) == 0 {
-			// Sometimes overlap a second fault, which can leave no majority.
-			heals = append(heals, nm.inject())
-		}
-		time.Sleep(time.Duration(500+nm.rng.IntN(2000)) * time.Millisecond)
-		for i := len(heals) - 1; i >= 0; i-- {
-			heals[i]()
-		}
-	}
 }
 
 // --- One run ---
@@ -650,6 +162,12 @@ type runResult struct {
 	ops, acked, ambiguous, readsOK, readsFailed int
 	faults                                      map[string]int
 
+	// Acknowledged writes checked one by one at the end (write-once keys and INCRs), and how many were lost.
+	confirmedChecked, lostWrites int
+	// Leader failover times in milliseconds, and failovers that never happened, per fault kind.
+	failovers        map[string][]float64
+	failoverTimeouts map[string]int
+
 	linearizable porcupine.CheckResult
 	converged    bool
 	convergeInfo string
@@ -659,7 +177,8 @@ type runResult struct {
 }
 
 func (r *runResult) passed() bool {
-	return r.setupErr == "" && r.finalErr == "" && r.linearizable == porcupine.Ok && r.converged && r.counterErr == ""
+	return r.setupErr == "" && r.finalErr == "" && r.linearizable == porcupine.Ok && r.converged && r.counterErr == "" &&
+		r.lostWrites == 0
 }
 
 func mark(ok bool) string {
@@ -677,8 +196,8 @@ func (r *runResult) line(total int) string {
 	for _, k := range sortedKeys(r.faults) {
 		fs = append(fs, fmt.Sprintf("%s:%d", k, r.faults[k]))
 	}
-	s := fmt.Sprintf("run %3d/%d  ops %4d  acked %4d  ambiguous %3d  [%s]  linearizable %s  converged %s  counters %s  %4.1fs",
-		r.run, total, r.ops, r.acked, r.ambiguous, strings.Join(fs, " "),
+	s := fmt.Sprintf("run %3d/%d  ops %4d  acked %4d  ambiguous %3d  lost %d  [%s]  linearizable %s  converged %s  counters %s  %4.1fs",
+		r.run, total, r.ops, r.acked, r.ambiguous, r.lostWrites, strings.Join(fs, " "),
 		map[bool]string{true: "ok", false: string(r.linearizable)}[r.linearizable == porcupine.Ok],
 		mark(r.converged), mark(r.counterErr == ""), r.elapsed.Seconds())
 	for _, e := range []string{r.finalErr, r.counterErr} {
@@ -704,7 +223,7 @@ func sortedKeys(m map[string]int) []string {
 	return ks
 }
 
-func runOnce(cfg config, run int, interrupted <-chan os.Signal) *runResult {
+func runOnce(cfg config, run int, newCluster func(dir string) (cluster, error), interrupted <-chan os.Signal) *runResult {
 	res := &runResult{run: run, faults: map[string]int{}}
 	started := time.Now()
 	defer func() { res.elapsed = time.Since(started) }()
@@ -716,27 +235,33 @@ func runOnce(cfg config, run int, interrupted <-chan os.Signal) *runResult {
 	}
 	rng := rand.New(rand.NewPCG(cfg.seed, uint64(run)))
 
-	c, err := startCluster(cfg, res.dir)
+	c, err := newCluster(res.dir)
 	if err != nil {
 		res.setupErr = err.Error()
 		return res
 	}
 	defer c.stop()
-	if !c.waitLeader(10 * time.Second) {
+	if !waitLeader(c, 10*time.Second) {
 		res.setupErr = "no leader elected within 10s"
 		return res
 	}
 
-	rec := &recorder{start: time.Now(), ackedIncr: map[string]int{}, ambiguousIncr: map[string]int{}}
+	// Keys look like "1790482999295790000-007/r2": the seed and run number make them new for every run,
+	// so on a cluster shared by many runs, each run's history still starts from empty keys.
+	keyPrefix := fmt.Sprintf("%d-%03d/", cfg.seed, run)
+	rec := &recorder{start: time.Now(), ackedIncr: map[string]int{}, ambiguousIncr: map[string]int{},
+		writeOnceAcked: map[string]string{}}
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.clients; i++ {
-		cl := &client{id: i, c: c, rec: rec, rng: rand.New(rand.NewPCG(cfg.seed+uint64(run), uint64(i)))}
+		cl := &client{id: i, keyPrefix: keyPrefix, c: c, rec: rec, rng: rand.New(rand.NewPCG(cfg.seed+uint64(run), uint64(i)))}
 		wg.Add(1)
 		go func() { defer wg.Done(); cl.run(cfg, stop) }()
 	}
 
-	nm := &nemesis{c: c, rng: rng, counts: res.faults, start: rec.start}
+	nm := &nemesis{c: c, rng: rng, counts: res.faults, start: rec.start,
+		failovers: map[string][]float64{}, failoverTimeouts: map[string]int{}}
+	res.failovers, res.failoverTimeouts = nm.failovers, nm.failoverTimeouts
 	done := make(chan struct{})
 	go func() { nm.run(cfg.duration); close(done) }()
 	select {
@@ -749,20 +274,20 @@ func runOnce(cfg config, run int, interrupted <-chan os.Signal) *runResult {
 	// Heal everything and keep clients running so the history also covers recovery.
 	nm.logf("heal all")
 	c.healAll()
-	c.waitLeader(10 * time.Second)
+	waitLeader(c, 10*time.Second)
 	time.Sleep(2 * time.Second)
 	close(stop)
 	wg.Wait()
 
 	// Final reads of every key, recorded like any other operation; a lost acked write fails the check.
-	final := &client{id: cfg.clients, c: c, rec: rec, rng: rand.New(rand.NewPCG(cfg.seed, 99))}
+	final := &client{id: cfg.clients, keyPrefix: keyPrefix, c: c, rec: rec, rng: rand.New(rand.NewPCG(cfg.seed, 99))}
 	finalValues := map[string]chaos.Output{}
 	var keys []string
 	for i := 0; i < cfg.registers; i++ {
-		keys = append(keys, fmt.Sprintf("r%d", i))
+		keys = append(keys, fmt.Sprintf("%sr%d", keyPrefix, i))
 	}
 	for i := 0; i < cfg.counters; i++ {
-		keys = append(keys, fmt.Sprintf("c%d", i))
+		keys = append(keys, fmt.Sprintf("%sc%d", keyPrefix, i))
 	}
 	for _, k := range keys {
 		ok := false
@@ -783,12 +308,18 @@ func runOnce(cfg config, run int, interrupted <-chan os.Signal) *runResult {
 			res.finalErr = "could not read final value of " + k
 		}
 	}
-	final.close()
-	res.converged, res.convergeInfo = c.waitConverged(20 * time.Second)
+	// Every acknowledged write-once key must still be there with its value.
+	lostWriteOnce, err := final.readBackWriteOnceKeys(rec.writeOnceAcked)
+	if err != nil {
+		res.finalErr = err.Error()
+	}
+	res.confirmedChecked += len(rec.writeOnceAcked)
+	res.lostWrites += lostWriteOnce
+	res.converged, res.convergeInfo = waitConverged(c, 20*time.Second)
 
 	// Counter check: each final value must lie between acked and acked + ambiguous INCRs.
 	for i := 0; i < cfg.counters; i++ {
-		k := fmt.Sprintf("c%d", i)
+		k := fmt.Sprintf("%sc%d", keyPrefix, i)
 		out, ok := finalValues[k]
 		if !ok {
 			continue
@@ -798,6 +329,11 @@ func runOnce(cfg config, run int, interrupted <-chan os.Signal) *runResult {
 			v, _ = strconv.ParseInt(out.Value, 10, 64)
 		}
 		lo, hi := int64(rec.ackedIncr[k]), int64(rec.ackedIncr[k]+rec.ambiguousIncr[k])
+		// A final value below the acknowledged count means that many acknowledged INCRs were lost.
+		res.confirmedChecked += rec.ackedIncr[k]
+		if v < lo {
+			res.lostWrites += int(lo - v)
+		}
 		if v < lo || v > hi {
 			res.counterErr += fmt.Sprintf("counter %s = %d, expected between %d (acked) and %d (acked + ambiguous); ", k, v, lo, hi)
 		}
@@ -812,6 +348,18 @@ func runOnce(cfg config, run int, interrupted <-chan os.Signal) *runResult {
 	}
 	res.ops = len(rec.ops)
 	res.acked, res.ambiguous, res.readsOK, res.readsFailed = rec.acked, rec.ambiguous, rec.readsOK, rec.readsFailed
+	res.acked += len(rec.writeOnceAcked)
+	res.ambiguous += len(rec.writeOnceAmbiguous)
+
+	// Delete this run's keys, so a cluster shared by many runs does not keep growing (which would make
+	// every snapshot bigger and later runs slower than earlier ones).
+	runKeys := append(keys, rec.writeOnceAmbiguous...)
+	for key := range rec.writeOnceAcked {
+		runKeys = append(runKeys, key)
+	}
+	final.deleteKeys(runKeys)
+	final.close()
+
 	result, info := porcupine.CheckOperationsVerbose(chaos.Model, rec.ops, cfg.checkTimeout)
 	res.linearizable = result
 
@@ -824,6 +372,7 @@ func runOnce(cfg config, run int, interrupted <-chan os.Signal) *runResult {
 		os.RemoveAll(res.dir)
 	} else {
 		saveHistory(filepath.Join(res.dir, "history.txt"), rec.ops)
+		c.saveLogs(res.dir, started)
 	}
 	return res
 }
@@ -848,84 +397,148 @@ func saveHistory(path string, ops []porcupine.Operation) {
 
 type summary struct {
 	text   string
-	json   map[string]any
+	json   results.Chaos
 	passed bool
 }
 
-func summarize(cfg config, results []*runResult, elapsed time.Duration) summary {
-	var passed, setupFailed, illegal, unknown, notConverged, counterBad, finalBad int
-	var ops, acked, ambiguous, readsOK, readsFailed int
-	faults := map[string]int{}
-	for _, r := range results {
+// summary is this run's entry in the JSON summary.
+func (r *runResult) summary() results.ChaosRun {
+	var problems []string
+	for _, problem := range []string{r.setupErr, r.finalErr, r.counterErr} {
+		if problem != "" {
+			problems = append(problems, problem)
+		}
+	}
+	if r.setupErr == "" && !r.converged {
+		problems = append(problems, "not converged: "+r.convergeInfo)
+	}
+	return results.ChaosRun{
+		Run:                    r.run,
+		Passed:                 r.passed(),
+		Seconds:                r.elapsed.Seconds(),
+		Operations:             r.ops,
+		AcknowledgedWrites:     r.acked,
+		AmbiguousWrites:        r.ambiguous,
+		ConfirmedWritesChecked: r.confirmedChecked,
+		LostConfirmedWrites:    r.lostWrites,
+		Linearizable:           string(r.linearizable),
+		Converged:              r.converged,
+		Faults:                 r.faults,
+		Error:                  strings.Join(problems, "; "),
+	}
+}
+
+func summarize(cfg config, runResults []*runResult, start time.Time) summary {
+	elapsed := time.Since(start)
+	s := results.Chaos{
+		Kind:        "chaos",
+		Environment: cfg.environment,
+		StartedAt:   start.UTC(),
+		WallSeconds: elapsed.Seconds(),
+		Settings: results.ChaosSettings{
+			Clients:            cfg.clients,
+			Registers:          cfg.registers,
+			Counters:           cfg.counters,
+			FaultSecondsPerRun: cfg.duration.Seconds(),
+			SnapshotThreshold:  cfg.snapshotAt,
+			Seed:               cfg.seed,
+			NodeFlags:          strings.Join(cfg.nodeFlags, " "),
+		},
+		Client:               results.Client{OS: runtime.GOOS + "/" + runtime.GOARCH, CPUs: runtime.NumCPU()},
+		Runs:                 len(runResults),
+		Faults:               map[string]int{},
+		FailoverMilliseconds: map[string][]float64{},
+		FailoverTimeouts:     map[string]int{},
+	}
+	if cfg.clusterKind == "kubernetes" {
+		var placement results.Client
+		s.Nodes, placement = kubernetesPlacement(cfg.namespace)
+		s.Client.Zone, s.Client.MachineType = placement.Zone, placement.MachineType
+	}
+	for _, r := range runResults {
+		s.PerRun = append(s.PerRun, r.summary())
 		if r.passed() {
-			passed++
+			s.Passed++
 		}
 		if r.setupErr != "" {
-			setupFailed++
+			s.SetupFailures++
 			continue
 		}
 		switch r.linearizable {
 		case porcupine.Illegal:
-			illegal++
+			s.LinearizabilityViolations++
 		case porcupine.Unknown:
-			unknown++
+			s.PorcupineTimeouts++
 		}
 		if !r.converged {
-			notConverged++
+			s.NotConverged++
 		}
 		if r.counterErr != "" {
-			counterBad++
+			s.CounterFailures++
 		}
 		if r.finalErr != "" {
-			finalBad++
+			s.FinalReadFailures++
 		}
-		ops += r.ops
-		acked += r.acked
-		ambiguous += r.ambiguous
-		readsOK += r.readsOK
-		readsFailed += r.readsFailed
-		for k, v := range r.faults {
-			faults[k] += v
+		s.Operations += r.ops
+		s.AcknowledgedWrites += r.acked
+		s.AmbiguousWrites += r.ambiguous
+		s.SuccessfulReads += r.readsOK
+		s.FailedReads += r.readsFailed
+		s.ConfirmedWritesChecked += r.confirmedChecked
+		s.LostConfirmedWrites += r.lostWrites
+		for kind, count := range r.faults {
+			s.Faults[kind] += count
+			s.TotalFaults += count
+		}
+		for kind, milliseconds := range r.failovers {
+			s.FailoverMilliseconds[kind] = append(s.FailoverMilliseconds[kind], milliseconds...)
+		}
+		for kind, count := range r.failoverTimeouts {
+			s.FailoverTimeouts[kind] += count
 		}
 	}
-	checked := len(results) - setupFailed
-	var fs []string
-	total := 0
-	for _, k := range sortedKeys(faults) {
-		fs = append(fs, fmt.Sprintf("%s %d", k, faults[k]))
-		total += faults[k]
+
+	checked := s.Runs - s.SetupFailures
+	var faultList []string
+	for _, kind := range sortedKeys(s.Faults) {
+		faultList = append(faultList, fmt.Sprintf("%s %d", kind, s.Faults[kind]))
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "==== QuorumDB chaos summary ====\n")
-	fmt.Fprintf(&b, "runs passed                 %d / %d\n", passed, len(results))
-	fmt.Fprintf(&b, "linearizability violations  %d   (porcupine: %d ok, %d illegal, %d timed out)\n", illegal, checked-illegal-unknown, illegal, unknown)
-	fmt.Fprintf(&b, "replicas converged          %d / %d\n", checked-notConverged, checked)
-	fmt.Fprintf(&b, "counter checks passed       %d / %d\n", checked-counterBad, checked)
-	fmt.Fprintf(&b, "operations recorded         %d\n", ops)
-	fmt.Fprintf(&b, "  acknowledged writes       %d\n", acked)
-	fmt.Fprintf(&b, "  ambiguous writes          %d   (timed out or failed; may or may not have applied)\n", ambiguous)
-	fmt.Fprintf(&b, "  successful reads          %d   (%d failed reads not recorded)\n", readsOK, readsFailed)
-	fmt.Fprintf(&b, "faults injected             %d   (%s)\n", total, strings.Join(fs, ", "))
+	fmt.Fprintf(&b, "runs passed                 %d / %d\n", s.Passed, s.Runs)
+	fmt.Fprintf(&b, "linearizability violations  %d   (porcupine: %d ok, %d illegal, %d timed out)\n",
+		s.LinearizabilityViolations, checked-s.LinearizabilityViolations-s.PorcupineTimeouts, s.LinearizabilityViolations, s.PorcupineTimeouts)
+	fmt.Fprintf(&b, "lost confirmed writes       %d   (of %d checked one by one: write-once keys read back, INCRs vs final counters)\n",
+		s.LostConfirmedWrites, s.ConfirmedWritesChecked)
+	fmt.Fprintf(&b, "replicas converged          %d / %d\n", checked-s.NotConverged, checked)
+	fmt.Fprintf(&b, "counter checks passed       %d / %d\n", checked-s.CounterFailures, checked)
+	fmt.Fprintf(&b, "operations recorded         %d\n", s.Operations)
+	fmt.Fprintf(&b, "  acknowledged writes       %d\n", s.AcknowledgedWrites)
+	fmt.Fprintf(&b, "  ambiguous writes          %d   (timed out or failed; may or may not have applied)\n", s.AmbiguousWrites)
+	fmt.Fprintf(&b, "  successful reads          %d   (%d failed reads not recorded)\n", s.SuccessfulReads, s.FailedReads)
+	fmt.Fprintf(&b, "faults injected             %d   (%s)\n", s.TotalFaults, strings.Join(faultList, ", "))
+	failoverKinds := map[string]int{}
+	for kind := range s.FailoverMilliseconds {
+		failoverKinds[kind]++
+	}
+	for kind := range s.FailoverTimeouts {
+		failoverKinds[kind]++
+	}
+	for _, kind := range sortedKeys(failoverKinds) {
+		samples := s.FailoverMilliseconds[kind]
+		fmt.Fprintf(&b, "leader failover, %-11s %d timed: median %.0f ms, max %.0f ms; %d with no new leader within %s\n",
+			kind, len(samples), results.Median(samples), slices.Max(append([]float64{0}, samples...)), s.FailoverTimeouts[kind], failoverTimeout)
+	}
 	fmt.Fprintf(&b, "setup                       3 nodes, %d clients, %d registers + %d counters, %s of faults per run, snapshot every %d entries\n",
 		cfg.clients, cfg.registers, cfg.counters, cfg.duration, cfg.snapshotAt)
 	fmt.Fprintf(&b, "seed                        %d\n", cfg.seed)
-	fmt.Fprintf(&b, "host                        %s/%s, %d CPUs\n", runtime.GOOS, runtime.GOARCH, runtime.NumCPU())
+	fmt.Fprintf(&b, "client                      %s, %d CPUs %s %s\n", s.Client.OS, s.Client.CPUs, s.Client.MachineType, s.Client.Zone)
+	for _, node := range s.Nodes {
+		fmt.Fprintf(&b, "node                        %s in %s (%s)\n", node.ID, node.Zone, node.MachineType)
+	}
 	fmt.Fprintf(&b, "wall time                   %s\n", elapsed.Round(time.Second))
 	if len(cfg.nodeFlags) > 0 {
 		fmt.Fprintf(&b, "node flags                  %s\n", strings.Join(cfg.nodeFlags, " "))
 	}
-	ok := passed == len(results) && len(results) == cfg.runs
-	return summary{
-		text:   b.String(),
-		passed: ok,
-		json: map[string]any{
-			"runs": len(results), "passed": passed, "linearizability_violations": illegal,
-			"porcupine_timeouts": unknown, "not_converged": notConverged, "counter_failures": counterBad,
-			"final_read_failures": finalBad, "setup_failures": setupFailed,
-			"operations": ops, "acknowledged_writes": acked, "ambiguous_writes": ambiguous,
-			"successful_reads": readsOK, "failed_reads": readsFailed, "faults": faults,
-			"clients": cfg.clients, "fault_seconds_per_run": cfg.duration.Seconds(), "seed": cfg.seed,
-			"node_flags": strings.Join(cfg.nodeFlags, " "), "wall_seconds": elapsed.Seconds(),
-		},
-	}
+	return summary{text: b.String(), json: s, passed: s.Passed == s.Runs && s.Runs == cfg.runs}
 }

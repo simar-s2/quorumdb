@@ -3,3 +3,7 @@ data/
 chaos-results/
 docs/
 .git/
+results/
+infra/
+deploy/
+.deploy/

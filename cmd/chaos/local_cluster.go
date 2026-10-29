@@ -165,12 +165,13 @@ func (c *localCluster) nodeName(i int) string     { return c.nodes[i].id }
 func (c *localCluster) redisAddress(i int) string { return c.nodes[i].redisAddr }
 func (c *localCluster) zone(i int) string         { return c.nodes[i].id }
 
-func (c *localCluster) kill(i int) bool {
+func (c *localCluster) kill(i int) (time.Time, bool) {
 	if !c.nodes[i].alive() {
-		return false
+		return time.Time{}, false
 	}
+	killedAt := time.Now()
 	c.nodes[i].kill()
-	return true
+	return killedAt, true
 }
 
 func (c *localCluster) restart(i int) { c.nodes[i].start() }

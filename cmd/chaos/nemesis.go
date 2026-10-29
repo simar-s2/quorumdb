@@ -63,14 +63,16 @@ func (nm *nemesis) leaderBeforeFault(node int) (oldLeader, oldTerm int) {
 }
 
 // timeFailover waits until a node other than oldLeader leads in a newer term, and records how long
-// that took after the fault was applied. It does nothing if oldLeader is -1.
-func (nm *nemesis) timeFailover(kind string, oldLeader, oldTerm int, faultApplied time.Time) {
+// that took. The clock starts just before the command that applies the fault was sent (faultSent),
+// so on Kubernetes the time includes kubectl's latency and NetworkPolicy propagation: it is an upper
+// bound on the real failover. It does nothing if oldLeader is -1.
+func (nm *nemesis) timeFailover(kind string, oldLeader, oldTerm int, faultSent time.Time) {
 	if oldLeader < 0 {
 		return
 	}
-	for time.Since(faultApplied) < failoverTimeout {
+	for time.Since(faultSent) < failoverTimeout {
 		if newLeader, term := leaderAndTerm(nm.c, oldLeader); newLeader >= 0 && term > oldTerm {
-			elapsed := time.Since(faultApplied)
+			elapsed := time.Since(faultSent)
 			nm.failovers[kind] = append(nm.failovers[kind], float64(elapsed.Microseconds())/1000)
 			nm.logf("new leader %s after %s", nm.c.nodeName(newLeader), elapsed.Round(time.Millisecond))
 			return
@@ -92,21 +94,23 @@ func (nm *nemesis) inject() func() {
 	switch kind {
 	case 0:
 		oldLeader, oldTerm := nm.leaderBeforeFault(n)
-		if !nm.c.kill(n) {
+		killedAt, wasRunning := nm.c.kill(n)
+		if !wasRunning {
 			return func() {}
 		}
 		nm.counts["kill"]++
 		nm.logf("kill -9 %s", name)
-		nm.timeFailover("kill", oldLeader, oldTerm, time.Now())
+		nm.timeFailover("kill", oldLeader, oldTerm, killedAt)
 		return func() { nm.logf("restart %s", name); nm.c.restart(n) }
 	case 1:
 		oldLeader, oldTerm := nm.leaderBeforeFault(n)
+		pausedAt := time.Now()
 		if !nm.c.setFrozen(n, true) {
 			return func() {}
 		}
 		nm.counts["pause"]++
 		nm.logf("pause (SIGSTOP) %s", name)
-		nm.timeFailover("pause", oldLeader, oldTerm, time.Now())
+		nm.timeFailover("pause", oldLeader, oldTerm, pausedAt)
 		return func() { nm.logf("resume %s", name); nm.c.setFrozen(n, false) }
 	case 6:
 		return nm.cutOffLeaderZone()
@@ -121,8 +125,9 @@ func (nm *nemesis) inject() func() {
 		oldLeader, oldTerm := nm.leaderBeforeFault(n)
 		nm.counts["isolate"]++
 		nm.logf("isolate %s (%s)", name, m)
+		cutAt := time.Now()
 		nm.c.setLinks(links, m)
-		nm.timeFailover("isolate", oldLeader, oldTerm, time.Now())
+		nm.timeFailover("isolate", oldLeader, oldTerm, cutAt)
 		return func() { nm.logf("heal %s", name); nm.c.setLinks(links, netproxy.Pass) }
 	case 3:
 		// Bridge: two nodes lose each other but both still reach the third.
@@ -176,8 +181,9 @@ func (nm *nemesis) cutOffLeaderZone() func() {
 	measuredLeader, oldTerm := nm.leaderBeforeFault(oldLeader)
 	nm.counts["leader-zone"]++
 	nm.logf("cut off zone %s, where the leader %s is (%s)", zone, nm.c.nodeName(oldLeader), m)
+	cutAt := time.Now()
 	nm.c.setLinks(links, m)
-	nm.timeFailover("leader-zone", measuredLeader, oldTerm, time.Now())
+	nm.timeFailover("leader-zone", measuredLeader, oldTerm, cutAt)
 	return func() { nm.logf("heal zone %s", zone); nm.c.setLinks(links, netproxy.Pass) }
 }
 

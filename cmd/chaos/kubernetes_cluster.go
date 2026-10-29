@@ -68,16 +68,18 @@ func (c *kubernetesCluster) exec(pod string, command ...string) (string, error) 
 // cleanly, flushing its log. Killing the process alone is not enough either: the kubelet restarts the
 // container in place, but after a few crashes it waits longer and longer, up to 5 minutes
 // (CrashLoopBackOff). A new pod starts with no such history.
-func (c *kubernetesCluster) kill(i int) bool {
+func (c *kubernetesCluster) kill(i int) (time.Time, bool) {
 	pod := c.pods[i]
 	// The kill itself cannot report success (the container, and the kill command in it, die with the
 	// server), so first check that the server is running.
 	if _, err := c.exec(pod, "pidof", "quorumdb"); err != nil {
-		return false
+		return time.Time{}, false
 	}
+	killedAt := time.Now()
 	c.exec(pod, "sh", "-c", "kill -KILL $(pidof quorumdb)")
-	kube.Kubectl("-n", c.namespace, "delete", "pod", pod, "--wait=false")
-	return true
+	// Delete in the background so the nemesis can start timing the failover right away.
+	go kube.Kubectl("-n", c.namespace, "delete", "pod", pod, "--wait=false")
+	return killedAt, true
 }
 
 // restart does nothing: the StatefulSet controller recreates a killed pod by itself.

@@ -25,8 +25,8 @@ type cluster interface {
 	// zone is the failure zone a node runs in. Each local node counts as its own zone.
 	zone(node int) string
 
-	// kill crashes a node with SIGKILL and reports whether it was running.
-	kill(node int) bool
+	// kill crashes a node with SIGKILL and reports whether it was running, and when the kill was sent.
+	kill(node int) (killedAt time.Time, wasRunning bool)
 	// restart brings a killed node back.
 	restart(node int)
 	// setFrozen pauses (SIGSTOP) or resumes (SIGCONT) a node and reports whether it was running.

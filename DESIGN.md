@@ -173,3 +173,57 @@ A follower forwards every command to the leader over a second connection and rel
 
 **Why did you not just report the best run?**
 The best run hides variance, and the variance is real: shared VMs, network jitter, background snapshots. The median of three with the full range is honest about it, and the raw runs are in the JSON for anyone who wants to check.
+
+## 4. Chaos testing
+
+### What was built
+
+The fault-injection harness in [`cmd/chaos`](cmd/chaos/) now has two backends behind one `cluster` interface ([`cluster.go`](cmd/chaos/cluster.go)), so the clients, the nemesis and the checks are the same code for both:
+
+| Fault | Local backend ([`local_cluster.go`](cmd/chaos/local_cluster.go)) | Kubernetes backend ([`kubernetes_cluster.go`](cmd/chaos/kubernetes_cluster.go)) |
+|---|---|---|
+| kill | SIGKILL the process, restart it when healed | `kill -9` inside the container via `kubectl exec`, then delete the pod; the StatefulSet creates a new one |
+| pause | SIGSTOP / SIGCONT the process | `kubectl exec ... kill -STOP` / `kill -CONT` (possible because of tini) |
+| isolate, bridge, one-way | TCP proxy per directed link, in reset or drop mode | One NetworkPolicy per receiving pod, enforced by Dataplane V2 (drop only) |
+| leader-zone | Cut every link between the leader's zone and the others (each local node counts as a zone) | The same, using the zone label of each pod's node |
+
+Each run checks four things:
+
+1. Linearizability of the whole history, with porcupine.
+2. Lost confirmed writes, counted one by one. 10% of operations SET a key nothing else writes, and every acknowledged one is read back at the end. A counter's final value below its acknowledged INCRs also counts.
+3. Counter bounds.
+4. That all replicas converge to the same state.
+
+For every fault that takes out the leader while the other two nodes are up, the harness also times how long a new leader takes to appear.
+
+On GKE the harness runs as a Job ([`deploy/k8s/chaos/`](deploy/k8s/chaos/)) on the tools node, with a service account that may delete pods, exec into them and manage NetworkPolicies, only in the `quorumdb` namespace. `make gke-chaos` deploys the chaos settings (a snapshot every 200 entries and a 2 s command timeout, the same as locally), runs the Job, and saves `results/gke/chaos.json`.
+
+### Why
+
+- **A kill must be a crash.** Deleting a pod sends SIGTERM, and QuorumDB then shuts down cleanly and flushes its log, which tests nothing. So the harness sends SIGKILL inside the container. It then deletes the pod, because restarting the same container again and again triggers the kubelet's CrashLoopBackOff (10 s, 20 s, 40 s, ... up to 5 minutes). The replacement pod also exercises what a real node failure needs: rescheduling, reattaching the disk, and recovery from the write-ahead log.
+- **tini as PID 1.** The kernel does not deliver SIGSTOP or SIGKILL to a PID namespace's init process from inside that namespace. With tini as PID 1, `quorumdb` is an ordinary child process and can be frozen and killed through `kubectl exec`.
+- **One NetworkPolicy per receiving pod.** NetworkPolicy has no deny rules, and when several policies select a pod, their allow rules add up. Two overlapping cuts written as separate policies ("block quorumdb-0", "block quorumdb-2") would each allow what the other blocks. The backend keeps the set of cut links and writes exactly one policy per receiver, allowing the Raft port from every peer except the blocked ones.
+- **Ingress-only policies can still cut one way.** Each node opens its own TCP connections for the RPCs it sends. Blocking connections into B from A stops A's RPCs to B, while B's RPCs to A travel on connections B opened, which are untouched. That is exactly the local proxy's one-way cut.
+- **Clients stay connected to cut-off nodes.** The policies cut only node-to-node traffic, as in the local test, so clients keep talking to an isolated or stale leader. That is the dangerous case: a leader that does not know it was replaced must not acknowledge writes or serve stale reads.
+- **Every run gets its own keys.** All GKE runs share one cluster, so keys carry the seed and run number, and each history starts from empty keys as porcupine's model assumes. Each run deletes its keys at the end, so the data, and therefore every snapshot, does not grow from run to run.
+- **Counting lost writes directly.** Porcupine fails a run if any acknowledged write is lost, but it does not say how many. Write-once keys give a plain number ("0 of N acknowledged writes lost") that does not depend on trusting the checker.
+- **Failover timing doubles as a check that the faults worked.** If a NetworkPolicy did not really cut traffic, the leader would never be replaced, and the run would report "no new leader within 10 s" for that fault.
+
+### Tradeoffs
+
+- **Faults are slower to apply.** A `kubectl exec` or `kubectl apply` takes tens to hundreds of milliseconds, against microseconds locally, so the fault windows are less sharp. Failover times are measured from just before the fault command is sent, so on GKE they are an upper bound that includes kubectl and policy propagation latency.
+- **A killed node is down longer.** A new pod has to be scheduled, mount its disk and start, which takes seconds. Locally a restart takes milliseconds. Kubernetes runs therefore spend more time on two nodes, which is realistic but makes the two backends' numbers differ.
+- **Drop only.** NetworkPolicy silently drops packets; there is no equivalent of the proxy's reset mode, so the GKE runs only test timeouts.
+- **Open connections depend on the policy engine.** On kind, the policies blocked new connections but let already-open ones through, and the harness showed it: isolate and leader-zone cuts produced no new leader. Raft keeps long-lived connections, so on GKE the failover numbers must be checked. Any "no new leader within 10 s" means the cuts did not take effect there.
+- **Broad test permissions.** The chaos service account can exec into and delete database pods. It is limited to one namespace and is only used by the test Job, but it should not exist in a production cluster.
+
+### Interview questions
+
+**Why not just `kubectl delete pod` to simulate a crash?**
+Deleting a pod is graceful: Kubernetes sends SIGTERM, waits, and only then sends SIGKILL. QuorumDB catches SIGTERM, flushes and fsyncs its log, and exits cleanly, so a torn write or an unsynced tail never happens. A crash has to be SIGKILL with no warning, so the harness sends it inside the container and deletes the pod afterwards.
+
+**How do you know a NetworkPolicy cut actually stopped traffic?**
+Through Raft itself. When the leader's zone is cut off, the other two nodes must stop receiving heartbeats and elect a new leader within a few election timeouts. The harness times that for every such fault and counts the times no new leader appeared. A cut that silently did nothing shows up as a timeout. That is how the kind test revealed that its policy engine does not cut open connections.
+
+**Porcupine already checks linearizability, so why count lost writes separately?**
+Porcupine gives a yes or no for a whole history and can time out on big ones. "Every acknowledged write is still there" is the property people actually care about in a database, and checking it key by key gives a number anyone can verify without trusting the checker. The negative control shows the two agree: with `-unsafe-early-ack`, porcupine flags every run and the write-once check also counts lost writes.

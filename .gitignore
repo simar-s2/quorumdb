@@ -5,3 +5,7 @@
 *.out
 *.prof
 .DS_Store
+/infra/terraform/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars

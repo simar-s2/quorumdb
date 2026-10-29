@@ -3,7 +3,7 @@ RUNS  ?= 100
 CHAOS_DURATION ?= 10s
 
 .PHONY: build test test-race vet cluster-up cluster-down cluster-status kill-leader bench chaos chaos-negative clean help \
-	gke-state-bucket up deploy down gke-status gke-bench gke-chaos
+	gke-state-bucket up deploy down gke-status gke-bench gke-chaos results
 
 build: ## Build the node binary and the chaos harness into ./bin
 	$(GO) build -o bin/quorumdb ./cmd/quorumdb
@@ -49,6 +49,9 @@ chaos: build ## Fault-injection test with linearizability checking (env: RUNS CH
 chaos-negative: build ## Show that the chaos checker catches deliberately unsafe builds
 	-bin/chaos -runs 10 -duration $(CHAOS_DURATION) -node-flags "-unsafe-local-reads" -out chaos-results/unsafe-local-reads
 	-bin/chaos -runs 10 -duration $(CHAOS_DURATION) -node-flags "-unsafe-early-ack" -out chaos-results/unsafe-early-ack
+
+results: ## Rebuild the README's results tables from results/local/*.json and results/gke/*.json
+	$(GO) run ./cmd/results -readme README.md
 
 clean:
 	rm -rf bin chaos-results

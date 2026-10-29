@@ -36,6 +36,7 @@ type config struct {
 	seed         uint64
 	out          string
 	summaryPath  string
+	keepFailures time.Duration
 	snapshotAt   int
 	checkTimeout time.Duration
 	nodeFlags    []string
@@ -56,6 +57,7 @@ func main() {
 	flag.Uint64Var(&cfg.seed, "seed", 0, "random seed (0 = time based)")
 	flag.StringVar(&cfg.out, "out", "chaos-results", "directory for the summary and for logs of failed runs")
 	flag.StringVar(&cfg.summaryPath, "summary", "", "where to write the JSON summary (default <out>/summary.json; - prints it)")
+	flag.DurationVar(&cfg.keepFailures, "keep-failures-for", 0, "if a run fails, wait this long before exiting, so a Kubernetes pod stays up for kubectl cp")
 	flag.IntVar(&cfg.snapshotAt, "snapshot-threshold", 200, "node snapshot threshold; small so snapshots and InstallSnapshot happen often")
 	flag.DurationVar(&cfg.checkTimeout, "check-timeout", 2*time.Minute, "porcupine time budget per run")
 	flag.StringVar(&nodeFlags, "node-flags", "", "extra flags for every node, space separated (e.g. -unsafe-local-reads)")
@@ -134,6 +136,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "chaos: writing the summary: %v\n", err)
 	}
 	if !s.passed {
+		if cfg.keepFailures > 0 {
+			// In Kubernetes, HOSTNAME is the pod's name.
+			fmt.Printf("\nsome runs failed; their histories and logs are in %s. Copy them within %s with:\n  kubectl -n %s cp %s:%s ./chaos-failures\n",
+				cfg.out, cfg.keepFailures, cfg.namespace, os.Getenv("HOSTNAME"), cfg.out)
+			time.Sleep(cfg.keepFailures)
+		}
 		os.Exit(1)
 	}
 }

@@ -42,7 +42,11 @@ func bothWays(a, b int) []link { return []link{{from: a, to: b}, {from: b, to: a
 func (nm *nemesis) inject() func() {
 	n := nm.target()
 	name := nm.c.nodeName(n)
-	switch kind := nm.rng.IntN(6); kind {
+	kind := nm.rng.IntN(6)
+	if kind >= 2 && len(nm.c.linkModes()) == 0 {
+		return func() {} // kinds 2 to 5 cut links, which this cluster cannot do
+	}
+	switch kind {
 	case 0:
 		if !nm.c.kill(n) {
 			return func() {}

@@ -18,7 +18,7 @@ const nodeCount = 3
 type link struct{ from, to int }
 
 // cluster is the system under test: three QuorumDB nodes, and the means to break them.
-// localCluster runs them as processes on this machine.
+// localCluster runs them as processes on this machine; kubernetesCluster drives pods with kubectl.
 type cluster interface {
 	nodeName(node int) string
 	redisAddress(node int) string
@@ -38,6 +38,8 @@ type cluster interface {
 	healAll()
 	// stop shuts the cluster down at the end of a run.
 	stop()
+	// saveLogs puts the nodes' logs since the run started into dir, for a failed run.
+	saveLogs(dir string, since time.Time)
 }
 
 // query sends one command to a node with a short timeout.

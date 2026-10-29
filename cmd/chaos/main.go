@@ -23,6 +23,9 @@ import (
 )
 
 type config struct {
+	clusterKind  string // "local" or "kubernetes"
+	namespace    string
+	environment  string
 	bin          string
 	runs         int
 	duration     time.Duration
@@ -40,7 +43,10 @@ type config struct {
 func main() {
 	var cfg config
 	var nodeFlags string
-	flag.StringVar(&cfg.bin, "bin", "./bin/quorumdb", "path to the quorumdb binary")
+	flag.StringVar(&cfg.clusterKind, "cluster", "local", "local: start the nodes as processes here; kubernetes: test the QuorumDB pods (run from a pod in the cluster)")
+	flag.StringVar(&cfg.namespace, "namespace", "quorumdb", "with -cluster kubernetes: the namespace of the QuorumDB StatefulSet")
+	flag.StringVar(&cfg.environment, "environment", "", "label saved in the summary (default local, or gke with -cluster kubernetes)")
+	flag.StringVar(&cfg.bin, "bin", "./bin/quorumdb", "with -cluster local: path to the quorumdb binary")
 	flag.IntVar(&cfg.runs, "runs", 100, "number of independent runs")
 	flag.DurationVar(&cfg.duration, "duration", 10*time.Second, "how long faults are injected in each run")
 	flag.IntVar(&cfg.clients, "clients", 8, "concurrent clients")
@@ -57,8 +63,40 @@ func main() {
 		cfg.seed = uint64(time.Now().UnixNano())
 	}
 	cfg.nodeFlags = strings.Fields(nodeFlags)
-	if _, err := os.Stat(cfg.bin); err != nil {
-		fatalf("node binary %s not found; run `make build` first", cfg.bin)
+
+	// newCluster gives each run its cluster: three fresh processes, or the shared Kubernetes pods.
+	var newCluster func(dir string) (cluster, error)
+	switch cfg.clusterKind {
+	case "local":
+		if _, err := os.Stat(cfg.bin); err != nil {
+			fatalf("node binary %s not found; run `make build` first", cfg.bin)
+		}
+		newCluster = func(dir string) (cluster, error) {
+			c, err := startLocalCluster(cfg, dir)
+			if err != nil {
+				return nil, err
+			}
+			return c, nil
+		}
+	case "kubernetes":
+		if len(cfg.nodeFlags) > 0 {
+			fatalf("-node-flags only works with -cluster local")
+		}
+		if err := checkKubernetesSettings(cfg.namespace, cfg.snapshotAt); err != nil {
+			fatalf("%v", err)
+		}
+		newCluster = func(string) (cluster, error) {
+			c, err := connectKubernetesCluster(cfg.namespace)
+			if err != nil {
+				return nil, err
+			}
+			return c, nil
+		}
+	default:
+		fatalf("-cluster must be local or kubernetes, not %q", cfg.clusterKind)
+	}
+	if cfg.environment == "" {
+		cfg.environment = map[string]string{"local": "local", "kubernetes": "gke"}[cfg.clusterKind]
 	}
 	if err := os.MkdirAll(cfg.out, 0o755); err != nil {
 		fatalf("%v", err)
@@ -70,8 +108,8 @@ func main() {
 	interrupted := make(chan os.Signal, 1)
 	signal.Notify(interrupted, os.Interrupt, syscall.SIGTERM)
 
-	fmt.Printf("QuorumDB chaos test: %d runs x %s of faults, 3 nodes, %d clients, seed %d\n",
-		cfg.runs, cfg.duration, cfg.clients, cfg.seed)
+	fmt.Printf("QuorumDB chaos test: %d runs x %s of faults, 3 nodes (%s), %d clients, seed %d\n",
+		cfg.runs, cfg.duration, cfg.clusterKind, cfg.clients, cfg.seed)
 	if len(cfg.nodeFlags) > 0 {
 		fmt.Printf("node flags: %s\n", strings.Join(cfg.nodeFlags, " "))
 	}
@@ -80,7 +118,7 @@ func main() {
 	var runResults []*runResult
 	start := time.Now()
 	for i := 1; i <= cfg.runs; i++ {
-		res := runOnce(cfg, i, interrupted)
+		res := runOnce(cfg, i, newCluster, interrupted)
 		runResults = append(runResults, res)
 		fmt.Println(res.line(cfg.runs))
 		if res.interrupted {
@@ -173,7 +211,7 @@ func sortedKeys(m map[string]int) []string {
 	return ks
 }
 
-func runOnce(cfg config, run int, interrupted <-chan os.Signal) *runResult {
+func runOnce(cfg config, run int, newCluster func(dir string) (cluster, error), interrupted <-chan os.Signal) *runResult {
 	res := &runResult{run: run, faults: map[string]int{}}
 	started := time.Now()
 	defer func() { res.elapsed = time.Since(started) }()
@@ -185,7 +223,7 @@ func runOnce(cfg config, run int, interrupted <-chan os.Signal) *runResult {
 	}
 	rng := rand.New(rand.NewPCG(cfg.seed, uint64(run)))
 
-	c, err := startLocalCluster(cfg, res.dir)
+	c, err := newCluster(res.dir)
 	if err != nil {
 		res.setupErr = err.Error()
 		return res
@@ -196,12 +234,15 @@ func runOnce(cfg config, run int, interrupted <-chan os.Signal) *runResult {
 		return res
 	}
 
+	// Keys look like "1790482999295790000-007/r2": the seed and run number make them new for every run,
+	// so on a cluster shared by many runs, each run's history still starts from empty keys.
+	keyPrefix := fmt.Sprintf("%d-%03d/", cfg.seed, run)
 	rec := &recorder{start: time.Now(), ackedIncr: map[string]int{}, ambiguousIncr: map[string]int{},
 		writeOnceAcked: map[string]string{}}
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.clients; i++ {
-		cl := &client{id: i, c: c, rec: rec, rng: rand.New(rand.NewPCG(cfg.seed+uint64(run), uint64(i)))}
+		cl := &client{id: i, keyPrefix: keyPrefix, c: c, rec: rec, rng: rand.New(rand.NewPCG(cfg.seed+uint64(run), uint64(i)))}
 		wg.Add(1)
 		go func() { defer wg.Done(); cl.run(cfg, stop) }()
 	}
@@ -225,14 +266,14 @@ func runOnce(cfg config, run int, interrupted <-chan os.Signal) *runResult {
 	wg.Wait()
 
 	// Final reads of every key, recorded like any other operation; a lost acked write fails the check.
-	final := &client{id: cfg.clients, c: c, rec: rec, rng: rand.New(rand.NewPCG(cfg.seed, 99))}
+	final := &client{id: cfg.clients, keyPrefix: keyPrefix, c: c, rec: rec, rng: rand.New(rand.NewPCG(cfg.seed, 99))}
 	finalValues := map[string]chaos.Output{}
 	var keys []string
 	for i := 0; i < cfg.registers; i++ {
-		keys = append(keys, fmt.Sprintf("r%d", i))
+		keys = append(keys, fmt.Sprintf("%sr%d", keyPrefix, i))
 	}
 	for i := 0; i < cfg.counters; i++ {
-		keys = append(keys, fmt.Sprintf("c%d", i))
+		keys = append(keys, fmt.Sprintf("%sc%d", keyPrefix, i))
 	}
 	for _, k := range keys {
 		ok := false
@@ -260,12 +301,11 @@ func runOnce(cfg config, run int, interrupted <-chan os.Signal) *runResult {
 	}
 	res.confirmedChecked += len(rec.writeOnceAcked)
 	res.lostWrites += lostWriteOnce
-	final.close()
 	res.converged, res.convergeInfo = waitConverged(c, 20*time.Second)
 
 	// Counter check: each final value must lie between acked and acked + ambiguous INCRs.
 	for i := 0; i < cfg.counters; i++ {
-		k := fmt.Sprintf("c%d", i)
+		k := fmt.Sprintf("%sc%d", keyPrefix, i)
 		out, ok := finalValues[k]
 		if !ok {
 			continue
@@ -295,7 +335,17 @@ func runOnce(cfg config, run int, interrupted <-chan os.Signal) *runResult {
 	res.ops = len(rec.ops)
 	res.acked, res.ambiguous, res.readsOK, res.readsFailed = rec.acked, rec.ambiguous, rec.readsOK, rec.readsFailed
 	res.acked += len(rec.writeOnceAcked)
-	res.ambiguous += rec.writeOnceAmbiguous
+	res.ambiguous += len(rec.writeOnceAmbiguous)
+
+	// Delete this run's keys, so a cluster shared by many runs does not keep growing (which would make
+	// every snapshot bigger and later runs slower than earlier ones).
+	runKeys := append(keys, rec.writeOnceAmbiguous...)
+	for key := range rec.writeOnceAcked {
+		runKeys = append(runKeys, key)
+	}
+	final.deleteKeys(runKeys)
+	final.close()
+
 	result, info := porcupine.CheckOperationsVerbose(chaos.Model, rec.ops, cfg.checkTimeout)
 	res.linearizable = result
 
@@ -308,6 +358,7 @@ func runOnce(cfg config, run int, interrupted <-chan os.Signal) *runResult {
 		os.RemoveAll(res.dir)
 	} else {
 		saveHistory(filepath.Join(res.dir, "history.txt"), rec.ops)
+		c.saveLogs(res.dir, started)
 	}
 	return res
 }
@@ -367,7 +418,7 @@ func summarize(cfg config, runResults []*runResult, start time.Time) summary {
 	elapsed := time.Since(start)
 	s := results.Chaos{
 		Kind:        "chaos",
-		Environment: "local",
+		Environment: cfg.environment,
 		StartedAt:   start.UTC(),
 		WallSeconds: elapsed.Seconds(),
 		Settings: results.ChaosSettings{
@@ -382,6 +433,11 @@ func summarize(cfg config, runResults []*runResult, start time.Time) summary {
 		Client: results.Client{OS: runtime.GOOS + "/" + runtime.GOARCH, CPUs: runtime.NumCPU()},
 		Runs:   len(runResults),
 		Faults: map[string]int{},
+	}
+	if cfg.clusterKind == "kubernetes" {
+		var placement results.Client
+		s.Nodes, placement = kubernetesPlacement(cfg.namespace)
+		s.Client.Zone, s.Client.MachineType = placement.Zone, placement.MachineType
 	}
 	for _, r := range runResults {
 		s.PerRun = append(s.PerRun, r.summary())
@@ -442,7 +498,10 @@ func summarize(cfg config, runResults []*runResult, start time.Time) summary {
 	fmt.Fprintf(&b, "setup                       3 nodes, %d clients, %d registers + %d counters, %s of faults per run, snapshot every %d entries\n",
 		cfg.clients, cfg.registers, cfg.counters, cfg.duration, cfg.snapshotAt)
 	fmt.Fprintf(&b, "seed                        %d\n", cfg.seed)
-	fmt.Fprintf(&b, "host                        %s, %d CPUs\n", s.Client.OS, s.Client.CPUs)
+	fmt.Fprintf(&b, "client                      %s, %d CPUs %s %s\n", s.Client.OS, s.Client.CPUs, s.Client.MachineType, s.Client.Zone)
+	for _, node := range s.Nodes {
+		fmt.Fprintf(&b, "node                        %s in %s (%s)\n", node.ID, node.Zone, node.MachineType)
+	}
 	fmt.Fprintf(&b, "wall time                   %s\n", elapsed.Round(time.Second))
 	if len(cfg.nodeFlags) > 0 {
 		fmt.Fprintf(&b, "node flags                  %s\n", strings.Join(cfg.nodeFlags, " "))

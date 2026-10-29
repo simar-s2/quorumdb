@@ -24,8 +24,9 @@ type recorder struct {
 	ackedIncr, ambiguousIncr               map[string]int
 
 	// writeOnceAcked maps every acknowledged write-once key to its value; all must survive.
-	writeOnceAcked     map[string]string
-	writeOnceAmbiguous int
+	writeOnceAcked map[string]string
+	// writeOnceAmbiguous lists the write-once keys whose SET got no clear answer.
+	writeOnceAmbiguous []string
 }
 
 func (r *recorder) now() int64 { return time.Since(r.start).Nanoseconds() }
@@ -59,7 +60,7 @@ func (r *recorder) recordWriteOnce(key, value string, acknowledged bool) {
 	if acknowledged {
 		r.writeOnceAcked[key] = value
 	} else {
-		r.writeOnceAmbiguous++
+		r.writeOnceAmbiguous = append(r.writeOnceAmbiguous, key)
 	}
 }
 
@@ -70,13 +71,15 @@ func (r *recorder) failedRead() {
 }
 
 type client struct {
-	id   int
-	c    cluster
-	rng  *rand.Rand
-	rec  *recorder
-	conn net.Conn
-	rd   *resp.Reader
-	seq  int
+	id int
+	// keyPrefix is put in front of every key, so each run has its own keys even on a shared cluster.
+	keyPrefix string
+	c         cluster
+	rng       *rand.Rand
+	rec       *recorder
+	conn      net.Conn
+	rd        *resp.Reader
+	seq       int
 }
 
 func (cl *client) close() {
@@ -163,7 +166,7 @@ func (cl *client) do(in chaos.Input) bool {
 // one must still be there at the end of the run, so a missing one is a lost write, counted directly.
 func (cl *client) writeOnce() bool {
 	cl.seq++
-	key := fmt.Sprintf("once/%d-%d", cl.id, cl.seq)
+	key := fmt.Sprintf("%sonce/%d-%d", cl.keyPrefix, cl.id, cl.seq)
 	value := fmt.Sprintf("%d-%d", cl.id, cl.seq)
 	v, err := cl.send(3*time.Second, "SET", key, value)
 	if errors.Is(err, errNotSent) {
@@ -222,6 +225,13 @@ func (cl *client) mgetWithRetry(keys []string) ([]resp.Value, error) {
 	}
 }
 
+// deleteKeys deletes keys, 100 per DEL, ignoring errors. It keeps a shared cluster's data small.
+func (cl *client) deleteKeys(keys []string) {
+	for start := 0; start < len(keys); start += 100 {
+		cl.send(3*time.Second, append([]string{"DEL"}, keys[start:min(start+100, len(keys))]...)...)
+	}
+}
+
 func (cl *client) run(cfg config, stop <-chan struct{}) {
 	defer cl.close()
 	for {
@@ -230,8 +240,8 @@ func (cl *client) run(cfg config, stop <-chan struct{}) {
 			return
 		default:
 		}
-		reg := fmt.Sprintf("r%d", cl.rng.IntN(cfg.registers))
-		ctr := fmt.Sprintf("c%d", cl.rng.IntN(cfg.counters))
+		reg := fmt.Sprintf("%sr%d", cl.keyPrefix, cl.rng.IntN(cfg.registers))
+		ctr := fmt.Sprintf("%sc%d", cl.keyPrefix, cl.rng.IntN(cfg.counters))
 		var ok bool
 		switch p := cl.rng.IntN(100); {
 		case p < 30:

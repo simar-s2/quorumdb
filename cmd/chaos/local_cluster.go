@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/simar-s2/quorumdb/internal/netproxy"
 )
@@ -208,6 +209,9 @@ func (c *localCluster) healAll() {
 		}
 	}
 }
+
+// saveLogs does nothing: the nodes already write their logs into the run directory.
+func (c *localCluster) saveLogs(dir string, since time.Time) {}
 
 func (c *localCluster) stop() {
 	for _, n := range c.nodes {

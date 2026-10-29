@@ -1,0 +1,22 @@
+# The database with the node settings the local chaos test uses: a snapshot every 200 log entries,
+# so snapshots and InstallSnapshot to lagging nodes happen all the time, and a 2 s command timeout.
+# The chaos test checks for these and refuses to run without them.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../base
+patches:
+- target:
+    kind: StatefulSet
+    name: quorumdb
+  patch: |-
+    - op: add
+      path: /spec/template/spec/containers/0/env/-
+      value:
+        name: QUORUMDB_SNAPSHOT_THRESHOLD
+        value: "200"
+    - op: add
+      path: /spec/template/spec/containers/0/env/-
+      value:
+        name: QUORUMDB_COMMAND_TIMEOUT
+        value: 2s

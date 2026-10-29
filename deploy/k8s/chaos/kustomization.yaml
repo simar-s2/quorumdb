@@ -1,0 +1,6 @@
+# The chaos test's permissions (and, later, its Job).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: quorumdb
+resources:
+- rbac.yaml

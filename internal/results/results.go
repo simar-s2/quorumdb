@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
@@ -98,6 +99,13 @@ type Chaos struct {
 	Faults      map[string]int `json:"faults"`
 	TotalFaults int            `json:"total_faults"`
 
+	// FailoverMilliseconds holds, per kind of fault that took out the leader (kill, pause, isolate,
+	// leader-zone), how long the other two nodes took to elect a new leader after the fault was
+	// applied. It is only measured when both other nodes were up. FailoverTimeouts counts the faults
+	// after which no new leader appeared within 10 s.
+	FailoverMilliseconds map[string][]float64 `json:"failover_milliseconds"`
+	FailoverTimeouts     map[string]int       `json:"failover_timeouts"`
+
 	PerRun []ChaosRun `json:"per_run"`
 }
 
@@ -125,6 +133,20 @@ type ChaosRun struct {
 	Converged              bool           `json:"converged"`
 	Faults                 map[string]int `json:"faults"`
 	Error                  string         `json:"error,omitempty"`
+}
+
+// Median returns the middle value (the mean of the two middle values for an even count), or 0.
+func Median(values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	sorted := append([]float64(nil), values...)
+	sort.Float64s(sorted)
+	middle := len(sorted) / 2
+	if len(sorted)%2 == 1 {
+		return sorted[middle]
+	}
+	return (sorted[middle-1] + sorted[middle]) / 2
 }
 
 // The lines around the JSON when it is printed to standard output, so a script can cut it out of a

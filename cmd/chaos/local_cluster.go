@@ -163,6 +163,7 @@ func startLocalCluster(cfg config, dir string) (*localCluster, error) {
 
 func (c *localCluster) nodeName(i int) string     { return c.nodes[i].id }
 func (c *localCluster) redisAddress(i int) string { return c.nodes[i].redisAddr }
+func (c *localCluster) zone(i int) string         { return c.nodes[i].id }
 
 func (c *localCluster) kill(i int) bool {
 	if !c.nodes[i].alive() {

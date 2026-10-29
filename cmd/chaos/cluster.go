@@ -22,6 +22,8 @@ type link struct{ from, to int }
 type cluster interface {
 	nodeName(node int) string
 	redisAddress(node int) string
+	// zone is the failure zone a node runs in. Each local node counts as its own zone.
+	zone(node int) string
 
 	// kill crashes a node with SIGKILL and reports whether it was running.
 	kill(node int) bool
@@ -67,8 +69,18 @@ func infoField(info, field string) string {
 
 // leader returns the index of the node leading with the highest term, or -1.
 func leader(c cluster) int {
+	node, _ := leaderAndTerm(c, -1)
+	return node
+}
+
+// leaderAndTerm returns the node leading with the highest term and that term, asking every node
+// except skip (-1 asks all). It returns -1 if no node it reached is leading.
+func leaderAndTerm(c cluster, skip int) (node, term int) {
 	best, bestTerm := -1, -1
 	for i := 0; i < nodeCount; i++ {
+		if i == skip {
+			continue
+		}
 		v, err := query(c.redisAddress(i), 200*time.Millisecond, "INFO", "raft")
 		if err != nil {
 			continue
@@ -78,7 +90,13 @@ func leader(c cluster) int {
 			best, bestTerm = i, term
 		}
 	}
-	return best
+	return best, bestTerm
+}
+
+// answers reports whether a node replies to INFO, i.e. it is running, not frozen and reachable.
+func answers(c cluster, node int) bool {
+	_, err := query(c.redisAddress(node), 200*time.Millisecond, "INFO", "raft")
+	return err == nil
 }
 
 func waitLeader(c cluster, timeout time.Duration) bool {

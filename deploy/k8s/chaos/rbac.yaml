@@ -1,5 +1,6 @@
 # What the chaos test may do, and only in the quorumdb namespace: read and delete pods, run commands
-# in them (kill -9, kill -STOP), read their logs, and read the StatefulSet's settings.
+# in them (kill -9, kill -STOP), read their logs, read the StatefulSet's settings, and create and
+# delete NetworkPolicies to cut links between pods.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -22,6 +23,9 @@ rules:
 - apiGroups: [apps]
   resources: [statefulsets]
   verbs: [get]
+- apiGroups: [networking.k8s.io]
+  resources: [networkpolicies]
+  verbs: [get, list, create, patch, update, delete, deletecollection]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

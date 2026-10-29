@@ -19,7 +19,14 @@ type kubernetesCluster struct {
 	namespace string
 	pods      [nodeCount]string // quorumdb-0, quorumdb-1, quorumdb-2
 	addresses [nodeCount]string // quorumdb-0.quorumdb-peers:6379, ...
+	zones     [nodeCount]string // a pod never changes zone: its disk is zonal
+
+	// blocked[to][from] is true while traffic from node "from" to node "to" is cut.
+	blocked [nodeCount][nodeCount]bool
 }
+
+// chaosPolicyLabel marks the NetworkPolicies this test creates, so healing can delete them all.
+const chaosPolicyLabel = "app.kubernetes.io/managed-by=quorumdb-chaos"
 
 // connectKubernetesCluster heals anything a previous run left behind and waits until all three pods
 // are ready, so every run starts from a healthy cluster.
@@ -32,11 +39,21 @@ func connectKubernetesCluster(namespace string) (*kubernetesCluster, error) {
 	if err := c.healAndWait(); err != nil {
 		return nil, err
 	}
+	for i, pod := range c.pods {
+		vm, err := kube.NodeOfPod(namespace, pod)
+		if err != nil {
+			return nil, err
+		}
+		if c.zones[i], _, err = kube.ZoneAndMachineType(vm); err != nil {
+			return nil, err
+		}
+	}
 	return c, nil
 }
 
 func (c *kubernetesCluster) nodeName(i int) string     { return c.pods[i] }
 func (c *kubernetesCluster) redisAddress(i int) string { return c.addresses[i] }
+func (c *kubernetesCluster) zone(i int) string         { return c.zones[i] }
 
 // exec runs a command in a QuorumDB container, like `kubectl exec quorumdb-1 -- pidof quorumdb`.
 func (c *kubernetesCluster) exec(pod string, command ...string) (string, error) {
@@ -80,11 +97,88 @@ func (c *kubernetesCluster) setFrozen(i int, frozen bool) bool {
 	return err == nil
 }
 
-// linkModes is empty: cutting links is not supported yet, so the nemesis skips link faults.
-func (c *kubernetesCluster) linkModes() []netproxy.Mode                { return nil }
-func (c *kubernetesCluster) setLinks(links []link, mode netproxy.Mode) {}
+// linkModes: a NetworkPolicy can only drop traffic. There is no equivalent of the local proxy's reset.
+func (c *kubernetesCluster) linkModes() []netproxy.Mode { return []netproxy.Mode{netproxy.Drop} }
 
-// healAll resumes frozen nodes and waits for every pod to be back and ready.
+// setLinks cuts or restores links with NetworkPolicy, which GKE Dataplane V2 enforces.
+//
+// NetworkPolicy can only allow traffic, and when several policies select one pod, anything one of them
+// allows is allowed. So separate "block quorumdb-0" and "block quorumdb-2" policies on the same pod
+// would cancel each other out. Instead this remembers every cut link and writes exactly one policy per
+// receiving pod, listing which peers may still reach its Raft port. A pod with no cut links has none.
+//
+// Blocking only what a pod receives is enough, even for one-way cuts: each node opens its own TCP
+// connections for the RPCs it sends. Blocking connections from A into B stops A's RPCs to B, while
+// B's RPCs to A, on connections B opened, still work.
+func (c *kubernetesCluster) setLinks(links []link, mode netproxy.Mode) {
+	receivers := map[int]bool{}
+	for _, l := range links {
+		c.blocked[l.to][l.from] = mode != netproxy.Pass
+		receivers[l.to] = true
+	}
+	var policies, policiesToDelete []string
+	for to := range receivers {
+		var blockedSenders []string
+		for from := 0; from < nodeCount; from++ {
+			if c.blocked[to][from] {
+				blockedSenders = append(blockedSenders, c.pods[from])
+			}
+		}
+		if len(blockedSenders) == 0 {
+			policiesToDelete = append(policiesToDelete, policyName(c.pods[to]))
+		} else {
+			policies = append(policies, receiverPolicy(c.namespace, c.pods[to], blockedSenders))
+		}
+	}
+	if len(policies) > 0 {
+		if _, err := kube.KubectlWithInput(strings.Join(policies, "---\n"), "apply", "-f", "-"); err != nil {
+			fmt.Fprintf(os.Stderr, "chaos: %v\n", err)
+		}
+	}
+	if len(policiesToDelete) > 0 {
+		arguments := append([]string{"-n", c.namespace, "delete", "networkpolicy", "--ignore-not-found"}, policiesToDelete...)
+		if _, err := kube.Kubectl(arguments...); err != nil {
+			fmt.Fprintf(os.Stderr, "chaos: %v\n", err)
+		}
+	}
+}
+
+func policyName(receiver string) string { return "chaos-cut-into-" + receiver }
+
+// receiverPolicy is the NetworkPolicy for one pod whose incoming Raft traffic from some peers is cut.
+// The Redis and health ports stay open to everyone, so the test clients can still reach a cut-off
+// node (as in the local test, where only links between nodes are cut) and the kubelet can still
+// probe it. The Raft port is open only to pods not in blockedSenders. NotIn also matches pods that
+// have no pod-name label at all, such as the test client.
+func receiverPolicy(namespace, receiver string, blockedSenders []string) string {
+	return fmt.Sprintf(`apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: %s
+  namespace: %s
+  labels:
+    app.kubernetes.io/managed-by: quorumdb-chaos
+spec:
+  podSelector:
+    matchLabels:
+      statefulset.kubernetes.io/pod-name: %s
+  policyTypes: [Ingress]
+  ingress:
+  - ports:
+    - port: 6379
+    - port: 8080
+  - from:
+    - podSelector:
+        matchExpressions:
+        - key: statefulset.kubernetes.io/pod-name
+          operator: NotIn
+          values: [%s]
+    ports:
+    - port: 7000
+`, policyName(receiver), namespace, receiver, strings.Join(blockedSenders, ", "))
+}
+
+// healAll removes every cut, resumes frozen nodes and waits for every pod to be back and ready.
 func (c *kubernetesCluster) healAll() {
 	if err := c.healAndWait(); err != nil {
 		fmt.Fprintf(os.Stderr, "chaos: %v\n", err)
@@ -92,6 +186,10 @@ func (c *kubernetesCluster) healAll() {
 }
 
 func (c *kubernetesCluster) healAndWait() error {
+	if _, err := kube.Kubectl("-n", c.namespace, "delete", "networkpolicy", "-l", chaosPolicyLabel, "--ignore-not-found"); err != nil {
+		return err
+	}
+	c.blocked = [nodeCount][nodeCount]bool{}
 	// A frozen pod never becomes ready, so resume every node first. SIGCONT to a running process does nothing.
 	for i := 0; i < nodeCount; i++ {
 		c.setFrozen(i, false)

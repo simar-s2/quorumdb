@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -155,6 +156,9 @@ type runResult struct {
 
 	// Acknowledged writes checked one by one at the end (write-once keys and INCRs), and how many were lost.
 	confirmedChecked, lostWrites int
+	// Leader failover times in milliseconds, and failovers that never happened, per fault kind.
+	failovers        map[string][]float64
+	failoverTimeouts map[string]int
 
 	linearizable porcupine.CheckResult
 	converged    bool
@@ -247,7 +251,9 @@ func runOnce(cfg config, run int, newCluster func(dir string) (cluster, error), 
 		go func() { defer wg.Done(); cl.run(cfg, stop) }()
 	}
 
-	nm := &nemesis{c: c, rng: rng, counts: res.faults, start: rec.start}
+	nm := &nemesis{c: c, rng: rng, counts: res.faults, start: rec.start,
+		failovers: map[string][]float64{}, failoverTimeouts: map[string]int{}}
+	res.failovers, res.failoverTimeouts = nm.failovers, nm.failoverTimeouts
 	done := make(chan struct{})
 	go func() { nm.run(cfg.duration); close(done) }()
 	select {
@@ -430,9 +436,11 @@ func summarize(cfg config, runResults []*runResult, start time.Time) summary {
 			Seed:               cfg.seed,
 			NodeFlags:          strings.Join(cfg.nodeFlags, " "),
 		},
-		Client: results.Client{OS: runtime.GOOS + "/" + runtime.GOARCH, CPUs: runtime.NumCPU()},
-		Runs:   len(runResults),
-		Faults: map[string]int{},
+		Client:               results.Client{OS: runtime.GOOS + "/" + runtime.GOARCH, CPUs: runtime.NumCPU()},
+		Runs:                 len(runResults),
+		Faults:               map[string]int{},
+		FailoverMilliseconds: map[string][]float64{},
+		FailoverTimeouts:     map[string]int{},
 	}
 	if cfg.clusterKind == "kubernetes" {
 		var placement results.Client
@@ -474,6 +482,12 @@ func summarize(cfg config, runResults []*runResult, start time.Time) summary {
 			s.Faults[kind] += count
 			s.TotalFaults += count
 		}
+		for kind, milliseconds := range r.failovers {
+			s.FailoverMilliseconds[kind] = append(s.FailoverMilliseconds[kind], milliseconds...)
+		}
+		for kind, count := range r.failoverTimeouts {
+			s.FailoverTimeouts[kind] += count
+		}
 	}
 
 	checked := s.Runs - s.SetupFailures
@@ -495,6 +509,18 @@ func summarize(cfg config, runResults []*runResult, start time.Time) summary {
 	fmt.Fprintf(&b, "  ambiguous writes          %d   (timed out or failed; may or may not have applied)\n", s.AmbiguousWrites)
 	fmt.Fprintf(&b, "  successful reads          %d   (%d failed reads not recorded)\n", s.SuccessfulReads, s.FailedReads)
 	fmt.Fprintf(&b, "faults injected             %d   (%s)\n", s.TotalFaults, strings.Join(faultList, ", "))
+	failoverKinds := map[string]int{}
+	for kind := range s.FailoverMilliseconds {
+		failoverKinds[kind]++
+	}
+	for kind := range s.FailoverTimeouts {
+		failoverKinds[kind]++
+	}
+	for _, kind := range sortedKeys(failoverKinds) {
+		samples := s.FailoverMilliseconds[kind]
+		fmt.Fprintf(&b, "leader failover, %-11s %d timed: median %.0f ms, max %.0f ms; %d with no new leader within %s\n",
+			kind, len(samples), results.Median(samples), slices.Max(append([]float64{0}, samples...)), s.FailoverTimeouts[kind], failoverTimeout)
+	}
 	fmt.Fprintf(&b, "setup                       3 nodes, %d clients, %d registers + %d counters, %s of faults per run, snapshot every %d entries\n",
 		cfg.clients, cfg.registers, cfg.counters, cfg.duration, cfg.snapshotAt)
 	fmt.Fprintf(&b, "seed                        %d\n", cfg.seed)

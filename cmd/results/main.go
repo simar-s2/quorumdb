@@ -84,6 +84,9 @@ func buildTables(directory string) (string, error) {
 		}
 	}
 	writeChaosTable(&out, chaosByEnvironment)
+	if err := writeNegativeControls(&out, filepath.Join(directory, "local")); err != nil {
+		return "", err
+	}
 	return out.String(), nil
 }
 
@@ -287,6 +290,34 @@ func writeChaosTable(out *strings.Builder, chaos []*results.Chaos) {
 		return fmt.Sprintf("%s, %s", c.StartedAt.Format("2006-01-02"), where)
 	})
 	out.WriteString("\nRaw data: `results/local/chaos.json` and `results/gke/chaos.json`, with every run's numbers and each failover time. Failover times run from just before the fault command was sent until another node answered as leader; on GKE they include `kubectl` and NetworkPolicy latency, so they are upper bounds.\n")
+}
+
+// negativeControls are the deliberately broken builds of make chaos-negative, which the checks
+// must catch. They only run locally, because they need extra flags on the node processes.
+var negativeControls = []struct{ flag, file, meaning string }{
+	{"-unsafe-local-reads", "chaos-unsafe-local-reads.json", "reads skip ReadIndex and use local state"},
+	{"-unsafe-early-ack", "chaos-unsafe-early-ack.json", "SET is acknowledged before it commits"},
+}
+
+func writeNegativeControls(out *strings.Builder, directory string) error {
+	out.WriteString("\n#### Does the checker catch real bugs?\n\n")
+	out.WriteString("The same harness against deliberately broken builds (`make chaos-negative`, local only). Every run should fail.\n\n")
+	out.WriteString("| Broken build | Runs | Runs porcupine flagged as not linearizable | Lost acknowledged writes, checked one by one |\n")
+	out.WriteString("|---|---:|---:|---:|\n")
+	for _, control := range negativeControls {
+		var chaos results.Chaos
+		found, err := load(filepath.Join(directory, control.file), &chaos)
+		if err != nil {
+			return err
+		}
+		if !found {
+			fmt.Fprintf(out, "| `%s` (%s) | not run yet | | |\n", control.flag, control.meaning)
+			continue
+		}
+		fmt.Fprintf(out, "| `%s` (%s) | %d | %d | %s of %s |\n", control.flag, control.meaning, chaos.Runs,
+			chaos.LinearizabilityViolations, formatCount(float64(chaos.LostConfirmedWrites)), formatCount(float64(chaos.ConfirmedWritesChecked)))
+	}
+	return nil
 }
 
 func sortedKeys(m map[string]int) []string {

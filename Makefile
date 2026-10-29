@@ -47,8 +47,11 @@ chaos: build ## Fault-injection test with linearizability checking (env: RUNS CH
 	bin/chaos -runs $(RUNS) -duration $(CHAOS_DURATION) -summary results/local/chaos.json
 
 chaos-negative: build ## Show that the chaos checker catches deliberately unsafe builds
-	-bin/chaos -runs 10 -duration $(CHAOS_DURATION) -node-flags "-unsafe-local-reads" -out chaos-results/unsafe-local-reads
-	-bin/chaos -runs 10 -duration $(CHAOS_DURATION) -node-flags "-unsafe-early-ack" -out chaos-results/unsafe-early-ack
+	@mkdir -p results/local
+	-bin/chaos -runs 10 -duration $(CHAOS_DURATION) -node-flags "-unsafe-local-reads" -out chaos-results/unsafe-local-reads \
+		-summary results/local/chaos-unsafe-local-reads.json
+	-bin/chaos -runs 10 -duration $(CHAOS_DURATION) -node-flags "-unsafe-early-ack" -out chaos-results/unsafe-early-ack \
+		-summary results/local/chaos-unsafe-early-ack.json
 
 results: ## Rebuild the README's results tables from results/local/*.json and results/gke/*.json
 	$(GO) run ./cmd/results -readme README.md

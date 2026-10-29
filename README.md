@@ -128,6 +128,28 @@ make build
   -peers n1=host1:7000,n2=host2:7000,n3=host3:7000 -data ./data/n1
 ```
 
+## Deploy to GKE (three zones)
+
+Terraform creates a regional GKE cluster with one `e2-standard-2` database node in each of three zones, plus one node for the benchmark and chaos clients. Kubernetes runs QuorumDB as a 3-replica StatefulSet with one pod per zone. [DESIGN.md](DESIGN.md) explains each piece.
+
+**This creates billed resources.** Run `make down` when you are done (see [Cost and teardown](DESIGN.md#cost-and-teardown)).
+
+You need `gcloud`, `terraform` (1.6+), `kubectl` with `gke-gcloud-auth-plugin`, and Docker with `buildx`.
+
+```bash
+gcloud auth login                         # for gcloud and docker push
+gcloud auth application-default login     # Terraform uses these credentials
+gcloud config set project <your-project-id>
+gcloud components install gke-gcloud-auth-plugin   # lets kubectl log in to GKE
+
+make gke-state-bucket   # one time: a GCS bucket for the Terraform state
+make up                 # terraform apply (shows the plan and asks), then build, push and deploy
+make gke-status         # zone, role and term of each pod
+make down               # delete QuorumDB and its disks, then terraform destroy (asks first)
+```
+
+The region is a variable: `make up REGION=europe-west1` (the default is `us-west1`). After a code change, `make deploy` rebuilds the image, tags it with the git commit, and rolls it out one pod at a time.
+
 ## Supported commands
 
 | Command | Notes |

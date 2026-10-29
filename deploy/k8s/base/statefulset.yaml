@@ -20,6 +20,20 @@ spec:
       labels:
         app: quorumdb
     spec:
+      # Only the database node pool; the tools node runs the benchmark and chaos clients.
+      nodeSelector:
+        cloud.google.com/gke-nodepool: db
+      # One pod per zone: the zone with the most QuorumDB pods may have at most one more than the zone
+      # with the fewest. With three pods and three zones that means exactly one each, so losing a zone
+      # costs one node and the other two still form a majority. DoNotSchedule leaves a pod pending
+      # rather than doubling up a zone.
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: quorumdb
       terminationGracePeriodSeconds: 10
       securityContext:
         runAsNonRoot: true

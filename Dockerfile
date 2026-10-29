@@ -6,8 +6,17 @@ WORKDIR /src
 COPY go.mod go.sum* ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/quorumdb ./cmd/quorumdb
+RUN for program in quorumdb benchmark chaos; do \
+      CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/$program ./cmd/$program || exit 1; \
+    done
 
+# The image for the benchmark and chaos clients: redis-benchmark plus the Go tools.
+FROM alpine:3.22 AS tools
+RUN apk add --no-cache redis && adduser -D -H -u 10001 tools
+COPY --from=build /out/benchmark /out/chaos /usr/local/bin/
+USER 10001
+
+# The QuorumDB server. It is the last stage, so a plain `docker build` produces it.
 FROM alpine:3.22 AS server
 # tini runs as PID 1 and starts quorumdb as its child. The kernel ignores SIGSTOP and SIGKILL sent to
 # PID 1 from inside the container, so this is what lets the chaos test freeze or kill the server with

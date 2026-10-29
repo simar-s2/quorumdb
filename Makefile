@@ -33,8 +33,14 @@ cluster-status: ## Show each node's role, term and log position
 kill-leader: ## Kill the current leader container to watch a failover
 	@leader=$$(scripts/leader.sh) && docker compose kill $$leader >/dev/null && echo "killed $$leader (the leader); restart it with: docker compose start"
 
-bench: ## redis-benchmark against the leader (env: REQUESTS CLIENTS PIPELINE TESTS TARGET)
-	@scripts/bench.sh
+# Saved with the results to say where they were measured, e.g. "MacBookPro18,1 Apple M1 Pro".
+HOST_DESCRIPTION ?= $(shell sysctl -n hw.model machdep.cpu.brand_string 2>/dev/null | paste -sd' ' -), Docker Desktop
+
+bench: ## redis-benchmark against the leader and a follower, 3 runs each; saves results/local/benchmark.json
+	@mkdir -p results/local
+	@docker compose build --quiet tools
+	docker compose run --rm tools benchmark -environment local -description "$(HOST_DESCRIPTION)" \
+		-out /results/benchmark.json $(BENCH_FLAGS)
 
 chaos: build ## Fault-injection test with linearizability checking (env: RUNS CHAOS_DURATION)
 	bin/chaos -runs $(RUNS) -duration $(CHAOS_DURATION)

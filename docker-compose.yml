@@ -2,7 +2,9 @@
 name: quorumdb
 
 x-node: &node
-  build: .
+  build:
+    context: .
+    target: server
   restart: "no"
   stop_grace_period: 5s
   environment:
@@ -36,11 +38,14 @@ services:
     ports: ["6381:6379"]
     volumes: ["n3-data:/data"]
 
-  # redis-benchmark inside the cluster network, used by `make bench`.
-  bench:
-    image: redis:8-alpine
+  # redis-benchmark and the benchmark tool, on the cluster network so Docker's port forwarding is
+  # not measured. Used by `make bench`.
+  tools:
+    build:
+      context: .
+      target: tools
     profiles: ["tools"]
-    entrypoint: ["redis-benchmark"]
+    volumes: ["./results/local:/results"]
 
 volumes:
   n1-data:

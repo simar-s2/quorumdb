@@ -1,0 +1,11 @@
+# Voluntary disruptions (node upgrades, drains, autoscaler moves) may take down at most one node at a
+# time, so two of three, a Raft majority, always remain. It does not stop crashes, or kubectl delete.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: quorumdb
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: quorumdb

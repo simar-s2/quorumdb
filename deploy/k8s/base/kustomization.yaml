@@ -5,4 +5,6 @@ namespace: quorumdb
 resources:
 - namespace.yaml
 - peers-service.yaml
+- client-service.yaml
 - statefulset.yaml
+- pod-disruption-budget.yaml

@@ -1,0 +1,14 @@
+# What applications connect to: quorumdb.quorumdb.svc.cluster.local:6379. It load-balances across
+# ready nodes, and any node can take any command because followers forward to the leader.
+apiVersion: v1
+kind: Service
+metadata:
+  name: quorumdb
+  labels:
+    app: quorumdb
+spec:
+  selector:
+    app: quorumdb
+  ports:
+  - name: redis
+    port: 6379

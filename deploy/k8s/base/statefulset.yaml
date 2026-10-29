@@ -49,6 +49,8 @@ spec:
           containerPort: 6379
         - name: raft
           containerPort: 7000
+        - name: http
+          containerPort: 8080
         env:
         # The node ID is the pod name: quorumdb-0, quorumdb-1 or quorumdb-2.
         - name: QUORUMDB_ID
@@ -60,6 +62,32 @@ spec:
           value: quorumdb-0=quorumdb-0.quorumdb-peers:7000,quorumdb-1=quorumdb-1.quorumdb-peers:7000,quorumdb-2=quorumdb-2.quorumdb-peers:7000
         - name: QUORUMDB_DATA
           value: /data
+        - name: QUORUMDB_HTTP_ADDR
+          value: ":8080"
+        # The health server starts after the node has replayed its log, so allow up to 5 minutes.
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 2
+          failureThreshold: 150
+        # Restart the container if the process stops answering for 30 s. The chaos test freezes a
+        # node for at most a few seconds, which this tolerates.
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        # Ready = knows the current leader. A node without one (election running, or cut off from
+        # the majority) is taken out of the client Service until it finds one again.
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: http
+          periodSeconds: 2
+          failureThreshold: 2
         resources:
           requests:
             cpu: "1"

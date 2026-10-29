@@ -101,8 +101,8 @@ type Chaos struct {
 
 	// FailoverMilliseconds holds, per kind of fault that took out the leader (kill, pause, isolate,
 	// leader-zone), how long the other two nodes took to elect a new leader after the fault was
-	// applied. It is only measured when both other nodes were up. FailoverTimeouts counts the faults
-	// after which no new leader appeared within 10 s.
+	// applied. It is only measured when that fault was the only one active and both other nodes
+	// answered. FailoverTimeouts counts the faults after which no new leader appeared within 10 s.
 	FailoverMilliseconds map[string][]float64 `json:"failover_milliseconds"`
 	FailoverTimeouts     map[string]int       `json:"failover_timeouts"`
 

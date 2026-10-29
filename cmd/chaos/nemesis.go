@@ -46,10 +46,13 @@ func (nm *nemesis) linkMode() netproxy.Mode {
 // bothWays returns the links from a to b and from b to a.
 func bothWays(a, b int) []link { return []link{{from: a, to: b}, {from: b, to: a}} }
 
-// leaderBeforeFault returns the current leader and its term if node is that leader and both other
-// nodes answer, so a new leader can be elected once the fault takes node out. Otherwise it returns -1
-// and the failover is not timed.
-func (nm *nemesis) leaderBeforeFault(node int) (oldLeader, oldTerm int) {
+// leaderBeforeFault returns the current leader and its term if the failover after this fault should
+// be timed: measure is true (no other fault is active), node is the leader, and both other nodes
+// answer, so they can elect a new leader once the fault takes node out. Otherwise it returns -1.
+func (nm *nemesis) leaderBeforeFault(node int, measure bool) (oldLeader, oldTerm int) {
+	if !measure {
+		return -1, 0
+	}
 	oldLeader, oldTerm = leaderAndTerm(nm.c, -1)
 	if oldLeader != node {
 		return -1, 0
@@ -83,8 +86,9 @@ func (nm *nemesis) timeFailover(kind string, oldLeader, oldTerm int, faultSent t
 	nm.logf("no new leader within %s", failoverTimeout)
 }
 
-// inject applies one random fault and returns the function that heals it.
-func (nm *nemesis) inject() func() {
+// inject applies one random fault and returns the function that heals it. If measure is true, it also
+// times the failover when the fault takes out the leader.
+func (nm *nemesis) inject(measure bool) func() {
 	n := nm.target()
 	name := nm.c.nodeName(n)
 	kind := nm.rng.IntN(7)
@@ -93,7 +97,7 @@ func (nm *nemesis) inject() func() {
 	}
 	switch kind {
 	case 0:
-		oldLeader, oldTerm := nm.leaderBeforeFault(n)
+		oldLeader, oldTerm := nm.leaderBeforeFault(n, measure)
 		killedAt, wasRunning := nm.c.kill(n)
 		if !wasRunning {
 			return func() {}
@@ -103,7 +107,7 @@ func (nm *nemesis) inject() func() {
 		nm.timeFailover("kill", oldLeader, oldTerm, killedAt)
 		return func() { nm.logf("restart %s", name); nm.c.restart(n) }
 	case 1:
-		oldLeader, oldTerm := nm.leaderBeforeFault(n)
+		oldLeader, oldTerm := nm.leaderBeforeFault(n, measure)
 		pausedAt := time.Now()
 		if !nm.c.setFrozen(n, true) {
 			return func() {}
@@ -113,7 +117,7 @@ func (nm *nemesis) inject() func() {
 		nm.timeFailover("pause", oldLeader, oldTerm, pausedAt)
 		return func() { nm.logf("resume %s", name); nm.c.setFrozen(n, false) }
 	case 6:
-		return nm.cutOffLeaderZone()
+		return nm.cutOffLeaderZone(measure)
 	case 2:
 		m := nm.linkMode()
 		var links []link
@@ -122,7 +126,7 @@ func (nm *nemesis) inject() func() {
 				links = append(links, bothWays(n, o)...)
 			}
 		}
-		oldLeader, oldTerm := nm.leaderBeforeFault(n)
+		oldLeader, oldTerm := nm.leaderBeforeFault(n, measure)
 		nm.counts["isolate"]++
 		nm.logf("isolate %s (%s)", name, m)
 		cutAt := time.Now()
@@ -163,7 +167,7 @@ func (nm *nemesis) inject() func() {
 // cutOffLeaderZone cuts every link between the leader's zone and the other zones, as if that zone's
 // network failed, and times the failover. With one node per zone this isolates the leader, but it is
 // worked out from zones, so it would also cut a zone holding several nodes.
-func (nm *nemesis) cutOffLeaderZone() func() {
+func (nm *nemesis) cutOffLeaderZone(measure bool) func() {
 	oldLeader := leader(nm.c)
 	if oldLeader < 0 {
 		return func() {}
@@ -178,7 +182,7 @@ func (nm *nemesis) cutOffLeaderZone() func() {
 		}
 	}
 	m := nm.linkMode()
-	measuredLeader, oldTerm := nm.leaderBeforeFault(oldLeader)
+	measuredLeader, oldTerm := nm.leaderBeforeFault(oldLeader, measure)
 	nm.counts["leader-zone"]++
 	nm.logf("cut off zone %s, where the leader %s is (%s)", zone, nm.c.nodeName(oldLeader), m)
 	cutAt := time.Now()
@@ -191,10 +195,12 @@ func (nm *nemesis) run(d time.Duration) {
 	end := time.Now().Add(d)
 	for time.Now().Before(end) {
 		time.Sleep(time.Duration(200+nm.rng.IntN(600)) * time.Millisecond)
-		heals := []func(){nm.inject()}
+		// Only the first fault of a round is timed. With nothing else broken, the other two nodes form a
+		// majority and must elect a new leader. A second, overlapping fault may leave no majority.
+		heals := []func(){nm.inject(true)}
 		if nm.rng.IntN(4) == 0 {
 			// Sometimes overlap a second fault, which can leave no majority.
-			heals = append(heals, nm.inject())
+			heals = append(heals, nm.inject(false))
 		}
 		time.Sleep(time.Duration(500+nm.rng.IntN(2000)) * time.Millisecond)
 		for i := len(heals) - 1; i >= 0; i-- {

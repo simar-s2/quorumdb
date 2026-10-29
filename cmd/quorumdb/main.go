@@ -32,6 +32,10 @@ func main() {
 		unsafeLocalReads = flag.Bool("unsafe-local-reads", false, "UNSAFE: serve reads from local state without ReadIndex (negative control for the chaos test)")
 		unsafeEarlyAck   = flag.Bool("unsafe-early-ack", false, "UNSAFE: acknowledge SET before it commits (negative control for the chaos test)")
 	)
+	// Kubernetes configures the node through environment variables; flags given on the command line still win.
+	if err := setFlagsFromEnvironment(flag.CommandLine); err != nil {
+		fatal("%v", err)
+	}
 	flag.Parse()
 
 	var level slog.Level
@@ -74,6 +78,26 @@ func main() {
 	s := <-sig
 	logger.Info("shutting down", "signal", s.String())
 	srv.Close()
+}
+
+// setFlagsFromEnvironment sets each flag from QUORUMDB_<NAME>, e.g. -raft-addr from QUORUMDB_RAFT_ADDR.
+func setFlagsFromEnvironment(flags *flag.FlagSet) error {
+	var firstError error
+	flags.VisitAll(func(f *flag.Flag) {
+		environmentName := environmentVariableFor(f.Name)
+		value, isSet := os.LookupEnv(environmentName)
+		if !isSet || firstError != nil {
+			return
+		}
+		if err := flags.Set(f.Name, value); err != nil {
+			firstError = fmt.Errorf("bad %s=%q: %v", environmentName, value, err)
+		}
+	})
+	return firstError
+}
+
+func environmentVariableFor(flagName string) string {
+	return "QUORUMDB_" + strings.ToUpper(strings.ReplaceAll(flagName, "-", "_"))
 }
 
 func parsePeers(s string) (map[string]string, error) {

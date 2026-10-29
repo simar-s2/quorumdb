@@ -49,3 +49,92 @@ If it was a follower's zone, nothing visible: the leader still has a majority (i
 
 **Why a dedicated node service account?**
 The default Compute Engine account often has the Editor role on the whole project, so any pod that reached the metadata server could act with it. The dedicated account can only write logs and metrics and pull from one repository.
+
+## 2. Kubernetes
+
+### What was built
+
+Plain manifests in [`deploy/k8s/base/`](deploy/k8s/base/), combined with kustomize:
+
+| File | What it is |
+|---|---|
+| `namespace.yaml` | The `quorumdb` namespace |
+| `peers-service.yaml` | Headless Service `quorumdb-peers`: a stable DNS name per pod, for Raft traffic |
+| `statefulset.yaml` | 3 replicas, one PVC each, one pod per zone, probes, config from environment variables |
+| `client-service.yaml` | Service `quorumdb` on port 6379 for applications |
+| `pod-disruption-budget.yaml` | At most one pod down for voluntary disruptions |
+
+`scripts/gke-deploy.sh` writes a small overlay in `.deploy/` that sets the image registry and tag, then runs `kubectl apply -k` and waits for the rollout.
+
+```mermaid
+flowchart TB
+    subgraph region["Region us-west1 (regional GKE control plane)"]
+        subgraph za["Zone a"]
+            n0["db node<br/>pod quorumdb-0"] --- d0[("pd-balanced<br/>data-quorumdb-0")]
+            tools["tools node<br/>benchmark / chaos Jobs"]
+        end
+        subgraph zb["Zone b"]
+            n1["db node<br/>pod quorumdb-1"] --- d1[("pd-balanced<br/>data-quorumdb-1")]
+        end
+        subgraph zc["Zone c"]
+            n2["db node<br/>pod quorumdb-2"] --- d2[("pd-balanced<br/>data-quorumdb-2")]
+        end
+    end
+    n0 <-->|"Raft :7000<br/>quorumdb-N.quorumdb-peers"| n1
+    n1 <-->|"Raft :7000"| n2
+    n0 <-->|"Raft :7000"| n2
+    tools -->|"Redis :6379"| n0 & n1 & n2
+```
+
+### Why
+
+- **StatefulSet, not Deployment.** Raft membership is fixed: every node must keep the same ID, the same address and the same log across restarts. A StatefulSet gives each pod a fixed name (`quorumdb-0`, used as its Raft ID), a fixed DNS name, and its own PersistentVolumeClaim that is reattached whenever the pod is recreated.
+- **Headless Service with `publishNotReadyAddresses`.** DNS records exist even for pods that are not ready. A node only becomes ready after it finds a leader, and it needs its peers' names to elect one. Without this setting, a fresh cluster could never start.
+- **`podManagementPolicy: Parallel`.** The default starts `quorumdb-1` only after `quorumdb-0` is ready, which never happens with one node. Parallel starts all three. It also means a pod that is down or frozen does not block the controller from recreating another one.
+- **Zone spread.** `topologySpreadConstraints` with `maxSkew: 1` on `topology.kubernetes.io/zone` makes the scheduler place exactly one pod per zone. `DoNotSchedule` leaves a pod pending rather than putting two in one zone, which would make that zone a single point of failure for the majority.
+- **`ReadWriteOncePod` disks.** Only one pod in the whole cluster can mount a disk at a time. Two processes appending to the same write-ahead log would corrupt it, and this rules that out even during a messy restart.
+- **Probes.** Readiness is "knows the current leader", so the client Service only routes to nodes that can serve. Liveness only checks that the process answers, and allows 30 seconds, because restarting a slow but healthy node would make things worse. A startup probe gives log replay up to 5 minutes.
+- **PodDisruptionBudget, `maxUnavailable: 1`.** GKE node upgrades drain nodes. The budget makes them go one node at a time, so two nodes (a majority) are always up.
+- **No CPU limit.** A CPU limit is enforced by pausing the container for the rest of a 100 ms scheduling period, which could delay heartbeats. The pod requests 1 CPU, so it is guaranteed that much. It has a memory limit so a leak cannot take down the node.
+- **Non-root and tini.** The process runs as UID 10001, and `fsGroup` makes the volume writable for it. tini as PID 1 forwards SIGTERM for a clean shutdown and lets the chaos test send SIGSTOP and SIGKILL to the server.
+
+### Tradeoffs
+
+- **A pod is pinned to its zone.** A zonal persistent disk can only attach to a VM in its own zone. If a whole zone goes down, that pod cannot move, and the cluster runs on two nodes until the zone returns. Regional persistent disks replicate synchronously to a second zone so the pod could move, but each fsync would then wait on a cross-zone write. Raft already keeps three copies in three zones.
+- **Readiness depends on the cluster.** If a majority is lost, every node becomes unready and the client Service has no endpoints. That is correct (no node can commit writes), but it means readiness is not a per-pod health signal.
+- **Fixed membership.** Scaling the StatefulSet to 5 replicas would not add Raft members, because the peer list is static. Changing membership at runtime is on the roadmap.
+- **In-cluster only.** The client Service is a ClusterIP. Exposing it outside the cluster would need a load balancer, and the Redis protocol here has no AUTH or TLS.
+
+### Cost and teardown
+
+What `make up` creates that is billed while it exists:
+
+- the GKE cluster management fee (regional clusters are not covered by the GKE free tier),
+- four `e2-standard-2` VMs (three db, one tools) and their 30 GB boot disks,
+- three 10 GiB `pd-balanced` disks for the PVCs,
+- an external IP per node,
+- traffic between zones (Raft sends every write to two other zones),
+- image storage in Artifact Registry, and logs in Cloud Logging.
+
+Check current prices with the [Google Cloud pricing calculator](https://cloud.google.com/products/calculator). Run `make down` as soon as the tests are finished.
+
+`make down` deletes the `quorumdb` namespace first and waits for the three PVC disks to be deleted, then runs `terraform destroy`. The order matters: GKE created those disks, not Terraform, so destroying the cluster first would leave them behind, still billed. Afterwards, these should print nothing:
+
+```bash
+gcloud container clusters list
+gcloud compute disks list --filter="name~^pvc-"
+gcloud compute instances list
+```
+
+The Terraform state bucket is the one thing left. It holds a few KB; delete it with `gcloud storage rm -r gs://<project>-quorumdb-tfstate`.
+
+### Interview questions
+
+**Why not a Deployment with a volume?**
+Deployment pods get random names and share one PVC template, so a pod's identity and disk are not tied together. Raft needs node `quorumdb-1` to always come back with `quorumdb-1`'s log. A StatefulSet guarantees that pairing, and creates the replacement only after the old pod is gone.
+
+**A node VM dies. What happens?**
+Raft first: the other two nodes still form a majority. If the dead node was the leader, they elect a new one within a randomized 300–600 ms timeout. Then Kubernetes: the pod's disk is zonal, so the pod can only restart in the same zone. With one db node per zone, it stays pending until GKE auto-repairs or replaces the VM. Then it reattaches its disk, replays its log, and the leader sends it whatever it missed.
+
+**Why is readiness "knows a leader" and not just "process is up"?**
+Readiness decides who gets client traffic. A node with no leader (cut off from the majority, or mid-election) can neither commit writes nor serve linearizable reads, so routing clients there only produces timeouts. Liveness is the "process is up" check, and it is kept loose so Kubernetes does not restart nodes that are healthy but waiting for an election.

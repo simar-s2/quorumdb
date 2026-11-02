@@ -329,7 +329,7 @@ var negativeControls = []struct{ flag, file, meaning string }{
 func writeNegativeControls(out *strings.Builder, directory string) error {
 	out.WriteString("\n#### Does the test catch real bugs?\n\n")
 	out.WriteString("The same chaos test, on my laptop, against two versions I broke on purpose (`make chaos-negative`). Every run should fail.\n\n")
-	out.WriteString("| Broken version | Runs | Runs where the checker found wrong answers | Saves that got \"OK\" but were lost |\n")
+	out.WriteString("| Broken version | Runs | Runs where the checker found wrong answers | Saves that got \"OK\" but were missing when read back |\n")
 	out.WriteString("|---|---:|---:|---:|\n")
 	for _, control := range negativeControls {
 		var chaos results.Chaos
@@ -344,6 +344,8 @@ func writeNegativeControls(out *strings.Builder, directory string) error {
 		fmt.Fprintf(out, "| `%s`: %s | %d | %d | %s of %s checked |\n", control.flag, control.meaning, chaos.Runs,
 			chaos.LinearizabilityViolations, formatCount(float64(chaos.LostConfirmedWrites)), formatCount(float64(chaos.ConfirmedWritesChecked)))
 	}
+	out.WriteString("\nWith the first broken version, the missing saves are not really gone: a node with old data answered the read, so they looked missing. " +
+		"With the second, the database said \"OK\" before the save was safe, so some really were lost.\n")
 	return nil
 }
 

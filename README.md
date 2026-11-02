@@ -1,286 +1,238 @@
+<div align="center">
+
+<img src="docs/images/logo.svg" width="112" alt="QuorumDB logo">
+
 # QuorumDB
 
-**A Redis-compatible key-value database in Go that replicates every write across a 3-node cluster using Raft, implemented from scratch.**
+**A database that keeps every piece of data on three computers, so it keeps working when one of them fails.**
 
-![Leader failover: the leader is killed, a new one is elected in about a second, and the data is still there](docs/images/failover.gif)
+[![Go 1.23+](https://img.shields.io/badge/Go-1.23%2B-00ADD8?style=flat&logo=go&logoColor=white)](go.mod)
+[![Redis compatible](https://img.shields.io/badge/Redis-compatible-DC382D?style=flat&logo=redis&logoColor=white)](internal/resp/resp.go)
+[![Google Cloud: 3 zones](https://img.shields.io/badge/Google_Cloud-3_zones-4285F4?style=flat&logo=googlecloud&logoColor=white)](infra/terraform/cluster.tf)
+[![Terraform](https://img.shields.io/badge/Terraform-1.6%2B-844FBA?style=flat&logo=terraform&logoColor=white)](infra/terraform)
+[![Server: no dependencies](https://img.shields.io/badge/server-no_dependencies-2ea44f?style=flat)](go.mod)
+[![License: MIT](https://img.shields.io/badge/license-MIT-3b82f6?style=flat)](LICENSE)
 
-## What I built
+<br>
 
-QuorumDB is a small distributed database that behaves like Redis from the outside and like a replicated state machine on the inside. I implemented the Raft consensus algorithm from the original paper without a consensus library. That covers leader election, log replication, crash recovery from disk, and snapshots. On top of it sits a server that speaks the Redis wire protocol, so the standard `redis-cli` and `redis-benchmark` tools work against it unchanged.
+<img src="docs/images/failover.gif" width="640" alt="One of the three computers is shut down on purpose. The other two choose a new leader and all the data is still there.">
 
-- **Consensus from scratch:** about 1,600 lines of Go implementing Raft (leader election, log replication, write-ahead logging, snapshots, linearizable reads). The whole project has 55 unit and integration tests.
-- **Zero lost writes under failure:** 100 automated chaos runs injected 675 faults (process kills, freezes, network partitions). All 229,198 acknowledged writes survived, and every run's history was verified linearizable by the porcupine checker.
-- **Fast:** about 38,000 writes/s and 116,000 reads/s through the leader of a 3-node cluster on one laptop, and 234,000 writes/s with pipelining (numbers and setup below).
-- **Drop-in Redis compatibility:** tested with the official `redis-cli` and `redis-benchmark`.
+</div>
 
-**Tech:** Go (the database itself uses only the standard library), Raft, TCP and RPC networking, write-ahead logging with fsync, Docker Compose, the porcupine linearizability checker, charmbracelet/vhs for the recordings.
+## ✨ What it does
 
-## Features
+- **Keeps three copies of everything.** Each time you save something, it's stored on three computers. You only get "OK" back once at least two of them have it safely on disk.
+- **Keeps going when a computer fails.** If one of the three crashes, freezes or loses its network connection, the other two carry on without it.
+- **Never gives you out-of-date data.** Whatever you read is always the latest saved version.
+- **Works with existing tools.** It speaks the same language as Redis, a popular database, so programs and tools built for Redis work with it.
+- **Runs in the cloud across three locations.** On Google Cloud, each of the three computers is in a different data center, so even a whole data center going down doesn't lose anything.
+- **Is tested by breaking it on purpose.** A "chaos test" crashes computers, freezes them and cuts their network while data is being saved, then checks that nothing was lost.
 
-- **Redis protocol (RESP2):** use `redis-cli`, `redis-benchmark` or any Redis client library, against any node.
-- **Raft from scratch:** leader election (with pre-vote and check-quorum), log replication, persistence, snapshots and log compaction.
-- **No acknowledged write is lost:** a write gets `OK` only after a majority of nodes has it on disk.
-- **Followers forward writes to the leader:** clients never need to know which node leads.
-- **Linearizable reads:** the leader confirms it is still leader (ReadIndex) before answering, so reads are never stale.
-- **Crash recovery:** a checksummed write-ahead log plus snapshots; a restarted node catches up on its own.
-- **Tested under failure:** a fault-injection harness kills, pauses and partitions nodes, and every run's history is checked for linearizability.
+I built the part that keeps the three computers in agreement myself, following a well-known method called Raft, without using a library for it.
 
-## Architecture
+## 🔬 How it works
 
-```mermaid
-flowchart LR
-    client(["Redis client<br/>redis-cli / redis-benchmark"])
+The three computers (called nodes) work as a team. One of them is the **leader** and the other two are **followers**. Every change goes through the leader, which keeps a numbered list of all changes, called the log.
 
-    subgraph n2["n2 · follower"]
-        r2["RESP server"]
-        raft2["Raft"]
-        wal2[("WAL + snapshot")]
-        kv2["KV store"]
-        raft2 --> wal2
-        raft2 --> kv2
-    end
+What happens when you save something, for example `SET user:42 alice` ("remember that user 42 is alice"):
 
-    subgraph n1["n1 · leader"]
-        r1["RESP server"]
-        raft1["Raft"]
-        wal1[("WAL + snapshot")]
-        kv1["KV store"]
-        r1 -->|"propose / ReadIndex"| raft1
-        raft1 --> wal1
-        raft1 -->|"apply committed entries"| kv1
-    end
+1. You can send it to any of the three nodes. A follower simply passes it on to the leader.
+2. The leader adds it to its list and sends it to both followers.
+3. Each follower saves it to its disk and replies "got it".
+4. As soon as two of the three nodes have it saved, the change is safe, even if one node is lost. The leader replies "OK".
+5. All three nodes apply the change, so they all end up with the same data.
 
-    subgraph n3["n3 · follower"]
-        raft3["Raft"]
-        wal3[("WAL + snapshot")]
-        kv3["KV store"]
-        raft3 --> wal3
-        raft3 --> kv3
-    end
+What happens when something goes wrong:
 
-    client -->|"RESP2"| r2
-    client -->|"RESP2"| r1
-    r2 -->|"forward to leader"| r1
-    raft1 -->|"AppendEntries / InstallSnapshot"| raft2
-    raft1 -->|"AppendEntries / InstallSnapshot"| raft3
-```
+- **The leader goes silent.** The leader sends a short "I'm still here" message 20 times a second. If the followers hear nothing for 0.3 to 0.6 seconds, they hold a vote and pick a new leader. Only a node that has every saved change can win, so nothing saved is ever lost.
+- **A node crashes and comes back.** It reads what it saved on its disk and then catches up on anything it missed while it was down.
+- **An old leader doesn't know it was replaced.** Before answering any question, the leader checks that the other nodes still follow it. An old leader can't pass this check, so it can never answer with out-of-date data.
 
-Each node keeps a **Raft log**: an ordered list of `(index, term, command)` entries. The leader decides the order, an entry is **committed** once it is on disk on a majority of nodes, and every node applies committed entries to its key-value store in the same order. So all three stores end up identical. Old log entries are folded into a snapshot and deleted.
+On Google Cloud, each node runs in a different data center (Google calls them zones) and has its own disk. The setup is described in code with Terraform (for the cloud machines and network) and Kubernetes (for running and restarting the program), so anyone can rebuild it with one command.
 
-Life of one write sent to a follower:
+More detail, the choices I made, and the problems I ran into: [DESIGN.md](DESIGN.md).
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant F as n2 (follower)
-    participant L as n1 (leader)
-    participant F3 as n3 (follower)
-    C->>F: SET user:42 alice
-    F->>L: forward
-    L->>L: append entry #57 (term 3) to log + WAL
-    par replicate
-        L->>F: AppendEntries [#57]
-        L->>F3: AppendEntries [#57]
-    end
-    F->>F: write + fsync WAL
-    F-->>L: success
-    Note over L: #57 is on disk on 2 of 3 nodes, so it is committed
-    L->>L: apply #57 to the KV store
-    L-->>F: +OK
-    F-->>C: +OK
-```
+## 📊 Results
 
-## Quick start
+Every number here comes from a real test run saved in the [`results/`](results/) folder, and `make results` turns those files into these tables. Results from my laptop and from Google Cloud are kept separate, because the two are very different:
 
-You need Docker (with Compose). `redis-cli` on your machine is optional; it also ships inside the containers (`docker compose exec n1 redis-cli`).
+- **On the laptop**, all three nodes and the test program share one computer and one disk.
+- **On Google Cloud**, every change has to travel between data centers and be saved to network disks, which takes longer.
+
+How to read the numbers:
+
+- **Requests per second:** how many saves (SET) or reads (GET) the database handled each second. Higher is better.
+- **Typical time / slow time:** how long one request took, in milliseconds (thousandths of a second). "Typical" is the middle request; "slow" is the slowest 1 in 100. Lower is better.
+- **One at a time / 16 at a time:** whether the test sent each request and waited for the answer, or sent 16 together.
+
+<!-- results:begin (generated by `make results` from results/*.json; do not edit by hand) -->
+
+### Speed test
+
+#### On my laptop
+
+| Sent to | Requests | Type | Requests per second | Typical time | Slow time (1 in 100) |
+|---|---|---|---:|---:|---:|
+| Leader | one at a time | Save (`SET`) | 25,294 (24,390–25,471) | 1.58 ms | 7.21 (6.37–7.29) ms |
+| Leader | one at a time | Read (`GET`) | 82,169 (81,400–82,338) | 0.44 ms | 1.68 (1.66–1.78) ms |
+| Leader | 16 at a time | Save (`SET`) | 167,504 (153,257–173,461) | 3.62 ms | 14.86 (13.05–19.63) ms |
+| Leader | 16 at a time | Read (`GET`) | 1,117,318 (956,938–1,162,791) | 0.51 ms | 2.12 (1.79–2.69) ms |
+| Follower (passes it to the leader) | one at a time | Save (`SET`) | 19,606 (19,562–20,511) | 2.08 ms | 8.07 (7.84–8.14) ms |
+| Follower (passes it to the leader) | one at a time | Read (`GET`) | 42,689 (41,710–43,169) | 0.98 ms | 3.37 (3.13–3.94) ms |
+
+Each number is the middle result of 3 runs, with the lowest and highest in brackets. Each run sent 200,000 requests from 50 connections at once, using `redis-benchmark 8.0.4`.
+Where: MacBook Pro (MacBookPro18,3), Apple M1 Pro, 10 cores, 32 GB, macOS 26.6.2, on AC power with macOS Low Power Mode on; Docker Desktop 28.3.3, VM with 10 CPUs and 7.7 GiB; all nodes and the client on this one machine.
+Measured on 2026-10-29. The leader changed during 0 of 18 runs. Raw data: `results/local/benchmark.json`.
+
+#### On Google Cloud (three data centers)
+
+Not run yet. `make gke-bench` saves the results to `results/gke/benchmark.json`.
+
+### Chaos test
+
+| | On my laptop | On Google Cloud (three data centers) |
+|---|---|---|
+| Runs where every check passed | **100 / 100** | not run yet |
+| Wrong answers found by the checker | **0** | not run yet |
+| Saves that got "OK" but were lost | **0** of 87,994 checked | not run yet |
+| Saves that got "OK" | 219,698 | not run yet |
+| Saves with no answer, because a problem hit mid-request (allowed either way) | 2,105 | not run yet |
+| Reads checked | 147,802 | not run yet |
+| Runs where all three nodes ended with the same data | 100 / 100 | not run yet |
+| Problems caused on purpose | 626: 87 crashes, 97 freezes, 88 nodes cut off, 90 leader's data center cut off, 83 links between two nodes cut, 181 one-way cuts | not run yet |
+| Time to pick a new leader after the leader crashed | 467 ms typical, 954 ms slowest (51 times) | not run yet |
+| Time to pick a new leader after the leader froze | 494 ms typical, 864 ms slowest (58 times) | not run yet |
+| Time to pick a new leader after the leader was cut off | 509 ms typical, 1,091 ms slowest (49 times) | not run yet |
+| Time to pick a new leader after the leader's data center was cut off | 490 ms typical, 1,109 ms slowest (73 times) | not run yet |
+| Time spent breaking things | 10 s per run, 23 min in total | not run yet |
+| Measured on | 2026-10-29, a Mac with Apple Silicon with 10 CPUs | not run yet |
+
+"Time to pick a new leader" runs from the moment the problem was caused until another node answered as the new leader. It is only measured when nothing else was broken at the same time. On Google Cloud it also includes the time Kubernetes takes to apply the problem, so the real times are a little shorter. Raw data, with every run and every time: `results/local/chaos.json` and `results/gke/chaos.json`.
+
+#### Does the test catch real bugs?
+
+The same chaos test, on my laptop, against two versions I broke on purpose (`make chaos-negative`). Every run should fail.
+
+| Broken version | Runs | Runs where the checker found wrong answers | Saves that got "OK" but were missing when read back |
+|---|---:|---:|---:|
+| `-unsafe-local-reads`: answers reads without checking it is still the leader | 10 | 10 | 5 of 12,185 checked |
+| `-unsafe-early-ack`: says OK before a save is on two nodes | 10 | 10 | 10 of 12,469 checked |
+
+With the first broken version, the missing saves are not really gone: a node with old data answered the read, so they looked missing. With the second, the database said "OK" before the save was safe, so some really were lost.
+
+<!-- results:end -->
+
+## ⚡️ Run it
+
+You need Docker installed.
 
 ```bash
 git clone https://github.com/simar-s2/quorumdb && cd quorumdb
-make cluster-up          # build the image, start 3 nodes, wait for a leader
+make cluster-up          # start the three nodes and wait until they pick a leader
 ```
 
-![Cluster startup: three nodes start and elect a leader](docs/images/cluster-startup.gif)
+<p align="center">
+  <img src="docs/images/cluster-startup.gif" width="640" alt="Three nodes start and pick a leader.">
+</p>
 
-The nodes listen on `localhost:6379` (n1), `6380` (n2) and `6381` (n3). Write through one node and read from the others:
+Save something on one node and read it from another:
 
 ```bash
 redis-cli -p 6379 SET user:42 alice
 redis-cli -p 6381 GET user:42          # "alice"
-make cluster-status                    # role, term and log position of each node
+make cluster-status                    # which node is the leader
 ```
 
-![Writes through one node are readable from every node](docs/images/replication.gif)
-
-Kill the leader and watch the cluster recover:
+Shut down the leader and watch a new one take over:
 
 ```bash
-make kill-leader                       # kill -9 the current leader's container
-make cluster-status                    # a new leader has been elected
-docker compose start                   # the old leader recovers from disk and catches up
+make kill-leader                       # stop the leader instantly, like a power cut
+make cluster-status                    # a new leader was picked
+docker compose start                   # the old leader comes back and catches up
+```
+
+Run the same tests as in the results above:
+
+```bash
+make bench                             # speed test, saved to results/local/benchmark.json
+make chaos                             # 100 chaos runs (RUNS=5 for a quick one), saved to results/local/chaos.json
 make cluster-down                      # stop everything and delete the data
 ```
 
-To build and run a node without Docker (Go 1.23+):
+## ☁️ Run it on Google Cloud
+
+One command builds everything on Google Cloud: the network, a place to store the program, and a cluster with one small computer in each of three data centers, plus one more computer that runs the tests. You need the Google Cloud command line (`gcloud`), Terraform, `kubectl` and Docker.
+
+1. Log in and choose a project:
+
+   ```bash
+   gcloud auth login
+   gcloud auth application-default login
+   gcloud config set project YOUR_PROJECT
+   gcloud components install gke-gcloud-auth-plugin
+   ```
+
+2. Make a storage bucket where Terraform keeps track of what it built (only once): `make gke-state-bucket`.
+3. Build everything and start the database: `make up`. Terraform first shows what it will create and asks you to confirm.
+4. Check it's running: `make gke-status` shows each node, its data center and whether it's the leader.
+5. Run a short chaos test first: `make gke-chaos RUNS=5`. When the leader's data center is cut off, a new leader should be picked every time. If not, the network cuts aren't working ([details](DESIGN.md#running-it-on-google-cloud-for-the-first-time)).
+6. Run the full tests: `make gke-chaos` (100 runs) and `make gke-bench`. The results are saved in `results/gke/`, and `make results` adds them to the tables above.
+7. Delete everything: `make down`. It deletes the database disks first, then everything else.
+
+This costs money while it's running, so run `make down` as soon as you're done. What it costs and how to check nothing is left: [DESIGN.md](DESIGN.md#cost-and-cleanup).
+
+## 🧪 How it's tested
+
+**The chaos test.** Each of the 100 runs starts with a healthy cluster. Eight test clients save and read data as fast as they can, and for 10 seconds the test keeps breaking things:
+
+- **Crashing a node** instantly, like pulling its power cord. Half the time it's the leader.
+- **Freezing a node** and unfreezing it a few seconds later. A frozen leader wakes up still thinking it's in charge, which is a classic way for databases to give wrong answers.
+- **Cutting the network:** cutting one node off from the others, cutting the link between two nodes, cutting traffic in one direction only, or cutting off the leader's whole data center.
+
+Sometimes two problems happen at once and no two nodes can talk to each other. Then the test fixes everything and checks:
+
+- **Nothing that got "OK" was lost.** Some saves go to keys that are written only once. At the end, every one of them that got "OK" is read back.
+- **Every answer was correct.** A tool called [porcupine](https://github.com/anishathalye/porcupine) replays every request and answer and checks that a correct database could have given them. A lost save or an out-of-date read fails the run.
+- **All three nodes ended up with the same data.**
+- **How quickly a new leader was picked** after the old one was taken out.
+
+To make sure the checks really catch problems, `make chaos-negative` runs the same test against two versions I broke on purpose. Every one of their runs should fail, and the table above shows whether they did.
+
+<p align="center">
+  <img src="docs/images/chaos.gif" width="640" alt="A short chaos test: each line is one run, with what was broken and whether every check passed.">
+</p>
+
+**The speed test.** The standard Redis speed test tool (`redis-benchmark`) sends 200,000 saves and 200,000 reads from 50 connections at once. It runs against the leader one request at a time, then 16 at a time, and then against a follower, which has to pass everything on to the leader. Each test runs three times.
+
+## 💡 Things I learned
+
+- **Deleting a program in Kubernetes isn't the same as a crash.** Kubernetes politely asks the program to stop first, so it saves everything and exits cleanly. To test a real crash, the chaos test kills the program instantly and only then lets Kubernetes replace it.
+- **Some programs can't be frozen.** Linux won't freeze or kill the first program in a container from inside it. Starting the database under a tiny helper program (tini) makes it freezable.
+- **Network rules add up instead of overriding each other.** Two "block" rules on the same node each let through what the other blocks. The test keeps just one rule per node that lists everything that's cut.
+- **Check that the problem you caused really happened.** On a test cluster on my laptop, cutting the network blocked new connections but not ones that were already open, so the leader never noticed it was cut off. Measuring how long a new leader took to appear is what revealed it.
+- **Test the old version before blaming the new one.** My laptop results dropped after these changes. The old version turned out to be just as slow, because the laptop's Low Power Mode was on.
+- **Waiting a fixed time can block things for good.** An early version gave up on sending a big backup to a lagging node after 30 seconds, which left that node stuck long after the network was fixed. The chaos test caught it, and the wait now grows with the size of the backup.
+
+## 🛠️ Development
 
 ```bash
-make build
-./bin/quorumdb -id n1 -redis-addr :6379 -raft-addr :7000 \
-  -peers n1=host1:7000,n2=host2:7000,n3=host3:7000 -data ./data/n1
+make test             # unit and integration tests
+make test-race        # the same, also checking for threading bugs
+make chaos-negative   # the chaos test against the broken versions
+make results          # rebuild the results tables from results/*.json
 ```
 
-## Deploy to GKE (three zones)
-
-Terraform creates a regional GKE cluster with one `e2-standard-2` database node in each of three zones, plus one node for the benchmark and chaos clients. Kubernetes runs QuorumDB as a 3-replica StatefulSet with one pod per zone. [DESIGN.md](DESIGN.md) explains each piece.
-
-**This creates billed resources.** Run `make down` when you are done (see [Cost and teardown](DESIGN.md#cost-and-teardown)).
-
-You need `gcloud`, `terraform` (1.6+), `kubectl` with `gke-gcloud-auth-plugin`, and Docker with `buildx`.
-
-```bash
-gcloud auth login                         # for gcloud and docker push
-gcloud auth application-default login     # Terraform uses these credentials
-gcloud config set project <your-project-id>
-gcloud components install gke-gcloud-auth-plugin   # lets kubectl log in to GKE
-
-make gke-state-bucket   # one time: a GCS bucket for the Terraform state
-make up                 # terraform apply (shows the plan and asks), then build, push and deploy
-make gke-status         # zone, role and term of each pod
-make down               # delete QuorumDB and its disks, then terraform destroy (asks first)
-```
-
-The region is a variable: `make up REGION=europe-west1` (the default is `us-west1`). After a code change, `make deploy` rebuilds the image, tags it with the git commit, and rolls it out one pod at a time.
-
-## Supported commands
-
-| Command | Notes |
+| Folder | What's in it |
 |---|---|
-| `PING [msg]`, `ECHO msg` | answered by the node you are connected to |
-| `GET key`, `MGET key [key ...]` | linearizable reads |
-| `SET key value [NX\|XX] [EX s\|PX ms\|EXAT ts\|PXAT ms\|KEEPTTL]` | `NX` = only if missing, `XX` = only if present |
-| `MSET key value [key value ...]` | atomic |
-| `DEL key [key ...]`, `EXISTS key [key ...]` | return counts, like Redis |
-| `INCR`, `DECR`, `INCRBY`, `DECRBY` | 64-bit integers with Redis' overflow errors |
-| `EXPIRE key seconds [NX\|XX\|GT\|LT]`, `PEXPIRE` | TTLs are replicated as absolute times |
-| `TTL key`, `PTTL key` | `-2` missing, `-1` no expiry |
-| `INFO [raft]`, `DBSIZE`, `DEBUG DIGEST` | cluster role, term, commit index; a hash to compare replicas |
+| `internal/raft` | how the nodes agree: picking a leader, copying changes, saving to disk, backups |
+| `internal/server` | the part that talks to Redis tools and passes requests to the leader |
+| `cmd/chaos` | the chaos test, for the laptop or for Google Cloud |
+| `cmd/benchmark`, `cmd/results` | the speed test, and the tool that builds the results tables |
+| `infra/terraform` | the Google Cloud setup |
+| `deploy/k8s` | the Kubernetes setup |
 
-## How replication and failover work
+It supports Redis's basic commands for text values: `GET`, `SET`, `MGET`, `MSET`, `DEL`, `EXISTS`, `INCR`, `DECR`, `EXPIRE`, `TTL` and a few more. Not done yet: adding or removing nodes while it runs, reading from followers, and other Redis data types such as lists.
 
-- **Writes:** any node accepts a write and forwards it to the leader. The leader appends it to its log and sends it to both followers. Each follower saves it to disk (fsync) and replies. Once two of the three nodes have it on disk, the write is committed, applied, and acknowledged. Concurrent writes share one network round trip and one disk flush.
-- **Reads:** before answering, the leader checks with a quick heartbeat round that a majority still follows it. A leader that was partitioned or paused, and doesn't know it has been replaced, cannot pass this check, so it never returns stale data.
-- **Failover:** followers expect a heartbeat every 50 ms. After 300–600 ms of silence a follower asks the others for votes and becomes leader only if its log has every committed write. Requests that were in flight when the old leader died get an "outcome unknown" error, never a false `OK`.
-- **Recovery:** a restarted node reloads its snapshot, replays its write-ahead log, and rejoins as a follower. The leader sends it whatever it missed: log entries, or a snapshot if those entries were already compacted away.
-
-## Benchmarks
-
-Measured with the official `redis-benchmark` against the Docker cluster. Each row is the median of 3 runs, with the range in brackets.
-
-| Target | Pipelining | Command | Requests/s | p50 latency | p99 latency |
-|---|---|---|---:|---:|---:|
-| Leader | none (`-P 1`) | SET | **38,292** (36,969–38,395) | 1.11 ms | **5.13 ms** (4.63–5.86) |
-| Leader | none (`-P 1`) | GET | **116,482** (113,186–116,686) | 0.34 ms | **0.67 ms** (0.67–0.77) |
-| Leader | 16 (`-P 16`) | SET | 234,192 (226,244–248,447) | 2.22 ms | 10.61 ms (8.28–11.81) |
-| Leader | 16 (`-P 16`) | GET | 1,428,571 (1,307,190–1,481,481) | 0.40 ms | 1.89 ms (1.66–2.17) |
-| Follower (forwards to leader) | none (`-P 1`) | SET | 30,111 (29,270–30,534) | 1.46 ms | 4.66 ms (4.62–4.78) |
-| Follower (forwards to leader) | none (`-P 1`) | GET | 60,772 (60,514–60,976) | 0.73 ms | 1.79 ms (1.73–1.90) |
-
-**Setup**
-
-- **Hardware:** MacBook Pro, Apple M1 Pro (10 cores), 32 GB RAM, macOS 26.6.2, on AC power. Docker Desktop 28.3.3, VM with 10 CPUs and 7.7 GiB RAM. All three nodes and the benchmark client share this one machine.
-- **Cluster:** `make cluster-up` with default settings: fsync on, 50 ms heartbeats, 300 ms election timeout, snapshot every 10,000 entries.
-- **Client:** redis-benchmark 8.10.2, run in a container on the cluster's Docker network so Docker Desktop's port forwarding is not measured. 200,000 requests, 50 parallel clients, random keys from a 100,000-key space, 3-byte values.
-- **Commands:** `make bench` runs `redis-benchmark -t set,get -n 200000 -c 50 -r 100000 -d 3 --csv` three times against the leader with `-P 1` and `-P 16` and against a follower with `-P 1`, and saves every run to `results/local/benchmark.json`.
-
-![redis-benchmark against the leader](docs/images/benchmark.gif)
-
-*The recording is a separate run, made while the screen recorder was also using the CPU, so its numbers are a little lower than the table.*
-
-**What limits it:** every write waits for two disk flushes (the leader's and one follower's), and here all three nodes share one virtual disk, so write p99 is mostly fsync time plus queueing. Reads need no disk flush, only one heartbeat round, which is why they are about 3x faster.
-
-**Durability caveat:** an fsync inside Docker Desktop's Linux VM took about 0.2 ms (p50) in a microbenchmark. Run natively on macOS, where Go's fsync issues a full `F_FULLFSYNC` flush (about 5 ms each), the same 3-node cluster does about 2,250 writes/s without pipelining (p99 36 ms) and about 29,750 writes/s with `-P 16`. Reads stay at about 92,000/s.
-
-## Fault-tolerance testing
-
-**Method.** `make chaos` runs 100 independent trials. Each trial:
-
-1. Starts a fresh 3-node cluster as separate processes, with a TCP proxy on each of the six directed links between nodes, so the harness can cut any link in either direction.
-2. Runs 8 concurrent clients against random nodes: `SET` (unique values), `GET` and `DEL` on 4 keys, and `INCR`/`GET` on 2 counters.
-3. For 10 seconds, repeatedly waits 0.2–0.8 s, injects a random fault, and heals it 0.5–2.5 s later. A quarter of the time two faults overlap, which can leave no majority. The faults:
-   - `kill -9` a node (the leader half the time), then restart it from its data directory;
-   - freeze a node with `SIGSTOP`, which creates a stale leader that still thinks it is in charge, then resume it;
-   - isolate a node, cut the link between two nodes, or cut just one direction of a link. Links are cut either with resets (errors right away) or by silently dropping traffic (timeouts).
-
-   Snapshots are taken every 200 log entries, so log compaction and snapshot transfer to lagging nodes happen constantly.
-4. Heals everything, reads the final value of every key, and checks three things:
-   - **Linearizability:** the full history of calls, responses and timings is checked with [porcupine](https://github.com/anishathalye/porcupine) against a model of a key-value store. A lost acknowledged write, a stale read, or an increment applied twice all fail this check. Writes whose outcome the client could not know (timeout, dropped connection) may count as either applied or not, but every read must agree on which.
-   - **Counters:** each counter's final value must be at least the number of acknowledged `INCR`s and at most acknowledged plus unknown.
-   - **Convergence:** all three nodes reach the same log position and the same state hash.
-
-**Results** (`make chaos`: 100 runs, 23 minutes on the laptop above)
-
-| | |
-|---|---|
-| Runs passed | **100 / 100** |
-| Linearizability violations (porcupine) | **0** |
-| Acknowledged writes | **229,198, none lost** |
-| Writes with an unknown outcome (timed out during a fault) | 1,990 |
-| Reads checked | 154,584 |
-| Faults injected | 675: 109 kills, 119 freezes, 109 node isolations, 109 two-node splits, 229 one-way link cuts |
-| Runs where all replicas ended with identical state | 100 / 100 |
-
-![A short live chaos run](docs/images/chaos.gif)
-
-**Does the checker actually catch bugs?** I ran the same harness against two deliberately broken builds (`make chaos-negative`). One served reads from local state instead of ReadIndex (`-unsafe-local-reads`); the other acknowledged `SET` before it was committed (`-unsafe-early-ack`). Porcupine flagged 10 of 10 runs as non-linearizable for each.
-
-The harness also caught a real bug during development: a fixed 30-second timeout on snapshot transfers let a silently dropped connection stall replication to one follower long after the network healed. The timeout now scales with snapshot size.
-
-## Project layout
-
-```
-cmd/quorumdb/         the database node
-cmd/chaos/            fault-injection harness (process kills, pauses, network cuts, porcupine check)
-internal/raft/        Raft: elections, replication, commit, write-ahead log, snapshots, ReadIndex
-internal/kv/          the replicated key-value store (state machine)
-internal/server/      Redis protocol server, command handling, forwarding to the leader
-internal/transport/   node-to-node RPC over TCP
-internal/resp/        RESP2 protocol parser and encoder
-internal/netproxy/    TCP proxy used to cut and blackhole network links in tests
-internal/chaos/       linearizability model for the porcupine checker
-scripts/              cluster status and benchmark helpers
-docs/images/          the terminal recordings in this README
-```
-
-## Running the tests
-
-```bash
-make test         # unit and integration tests
-make test-race    # same, with Go's race detector
-make chaos        # 100 fault-injection runs (about 25 minutes); RUNS=5 for a quick one
-make chaos-negative   # the same harness against deliberately unsafe builds (should fail)
-```
-
-The Raft unit tests run whole clusters over a simulated network that can partition nodes, cut links, and drop or delay messages. They cover elections (including a forced split vote and pre-vote), log conflicts after partitions, restarts and crash recovery, snapshots and InstallSnapshot, stale-leader reads, and a combined churn test. The integration tests run three real nodes over TCP.
-
-## Limitations and roadmap
-
-Current limitations:
-
-- **Fixed membership:** nodes are configured at startup; adding or removing nodes at runtime is not supported yet.
-- **Reads go through the leader:** followers forward reads instead of serving them, so read throughput does not grow with more nodes.
-- **In-memory data:** the dataset must fit in RAM, and a snapshot is a full copy sent in one message.
-- **A subset of Redis:** strings only; no hashes, lists, transactions, pub/sub, AUTH or TLS.
-- **One replication batch in flight per follower.** I tried pipelining AppendEntries, but on this setup it was slower: more in-flight batches meant more, smaller disk flushes on the followers.
-- **Measured on one laptop:** all three nodes share one CPU and one disk, so the numbers above say little about a real multi-machine deployment.
-
-Roadmap:
-
-1. Adding and removing nodes at runtime (Raft membership changes).
-2. Serving reads from followers (read index from the leader) and optional leader leases.
-3. A dedicated disk-writer thread so replication can be pipelined without extra disk flushes.
-4. Chunked, streaming snapshots.
-5. Hashes, lists and `MULTI`/`EXEC`.
-6. Disk-fault and clock-skew injection in the chaos harness, and a run across separate machines.
-
-## License
+## 📄 License
 
 [MIT](LICENSE)

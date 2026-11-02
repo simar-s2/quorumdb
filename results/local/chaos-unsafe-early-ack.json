@@ -1,0 +1,261 @@
+{
+  "kind": "chaos",
+  "environment": "local",
+  "started_at": "2026-11-02T23:27:41.398593Z",
+  "wall_seconds": 135.917161917,
+  "settings": {
+    "clients": 8,
+    "registers": 4,
+    "counters": 2,
+    "fault_seconds_per_run": 10,
+    "snapshot_threshold": 200,
+    "seed": 1793662061398441000,
+    "node_flags": "-unsafe-early-ack"
+  },
+  "client": {
+    "os": "darwin/arm64",
+    "cpus": 10
+  },
+  "runs": 10,
+  "passed": 0,
+  "linearizability_violations": 10,
+  "porcupine_timeouts": 0,
+  "not_converged": 0,
+  "counter_failures": 0,
+  "final_read_failures": 0,
+  "setup_failures": 0,
+  "operations": 47722,
+  "acknowledged_writes": 31556,
+  "ambiguous_writes": 133,
+  "successful_reads": 21155,
+  "failed_reads": 100,
+  "confirmed_writes_checked": 12469,
+  "lost_confirmed_writes": 10,
+  "faults": {
+    "bridge": 11,
+    "isolate": 7,
+    "kill": 8,
+    "leader-zone": 15,
+    "one-way": 19,
+    "pause": 11
+  },
+  "total_faults": 71,
+  "failover_milliseconds": {
+    "isolate": [
+      449.823,
+      424.688
+    ],
+    "kill": [
+      435.239,
+      415.309,
+      386.216,
+      529.092
+    ],
+    "leader-zone": [
+      539.385,
+      522.096,
+      636.675,
+      532.435,
+      413.039,
+      373.041,
+      345.352,
+      530.451,
+      437.117,
+      530.727
+    ],
+    "pause": [
+      593.583,
+      389.66,
+      397.682,
+      460.923,
+      459.974,
+      460.741,
+      384.007
+    ]
+  },
+  "failover_timeouts": {},
+  "per_run": [
+    {
+      "run": 1,
+      "passed": false,
+      "seconds": 13.958011375,
+      "operations": 3905,
+      "acknowledged_writes": 2625,
+      "ambiguous_writes": 4,
+      "confirmed_writes_checked": 1050,
+      "lost_confirmed_writes": 0,
+      "linearizable": "Illegal",
+      "converged": true,
+      "faults": {
+        "bridge": 3,
+        "leader-zone": 1,
+        "one-way": 4,
+        "pause": 3
+      }
+    },
+    {
+      "run": 2,
+      "passed": false,
+      "seconds": 14.793253459,
+      "operations": 4438,
+      "acknowledged_writes": 2905,
+      "ambiguous_writes": 20,
+      "confirmed_writes_checked": 1166,
+      "lost_confirmed_writes": 0,
+      "linearizable": "Illegal",
+      "converged": true,
+      "faults": {
+        "bridge": 1,
+        "isolate": 1,
+        "kill": 1,
+        "leader-zone": 1,
+        "one-way": 1
+      }
+    },
+    {
+      "run": 3,
+      "passed": false,
+      "seconds": 13.736489208,
+      "operations": 3618,
+      "acknowledged_writes": 2347,
+      "ambiguous_writes": 15,
+      "confirmed_writes_checked": 925,
+      "lost_confirmed_writes": 0,
+      "linearizable": "Illegal",
+      "converged": true,
+      "faults": {
+        "isolate": 2,
+        "kill": 1,
+        "leader-zone": 1,
+        "one-way": 1,
+        "pause": 3
+      }
+    },
+    {
+      "run": 4,
+      "passed": false,
+      "seconds": 12.910084041,
+      "operations": 4386,
+      "acknowledged_writes": 2885,
+      "ambiguous_writes": 11,
+      "confirmed_writes_checked": 1158,
+      "lost_confirmed_writes": 1,
+      "linearizable": "Illegal",
+      "converged": true,
+      "faults": {
+        "bridge": 2,
+        "kill": 2,
+        "leader-zone": 2,
+        "one-way": 2
+      }
+    },
+    {
+      "run": 5,
+      "passed": false,
+      "seconds": 12.99339275,
+      "operations": 3916,
+      "acknowledged_writes": 2577,
+      "ambiguous_writes": 5,
+      "confirmed_writes_checked": 992,
+      "lost_confirmed_writes": 2,
+      "linearizable": "Illegal",
+      "converged": true,
+      "faults": {
+        "isolate": 1,
+        "leader-zone": 2,
+        "one-way": 2,
+        "pause": 3
+      }
+    },
+    {
+      "run": 6,
+      "passed": false,
+      "seconds": 14.061126458,
+      "operations": 5935,
+      "acknowledged_writes": 3963,
+      "ambiguous_writes": 13,
+      "confirmed_writes_checked": 1597,
+      "lost_confirmed_writes": 0,
+      "linearizable": "Illegal",
+      "converged": true,
+      "faults": {
+        "bridge": 1,
+        "kill": 1,
+        "leader-zone": 1,
+        "one-way": 1,
+        "pause": 1
+      }
+    },
+    {
+      "run": 7,
+      "passed": false,
+      "seconds": 12.844455917,
+      "operations": 4604,
+      "acknowledged_writes": 3027,
+      "ambiguous_writes": 15,
+      "confirmed_writes_checked": 1189,
+      "lost_confirmed_writes": 2,
+      "linearizable": "Illegal",
+      "converged": true,
+      "faults": {
+        "leader-zone": 3,
+        "one-way": 1
+      }
+    },
+    {
+      "run": 8,
+      "passed": false,
+      "seconds": 12.980056583,
+      "operations": 5020,
+      "acknowledged_writes": 3396,
+      "ambiguous_writes": 19,
+      "confirmed_writes_checked": 1296,
+      "lost_confirmed_writes": 0,
+      "linearizable": "Illegal",
+      "converged": true,
+      "faults": {
+        "bridge": 2,
+        "isolate": 1,
+        "kill": 2,
+        "leader-zone": 1,
+        "pause": 1
+      }
+    },
+    {
+      "run": 9,
+      "passed": false,
+      "seconds": 14.752874917,
+      "operations": 5890,
+      "acknowledged_writes": 3920,
+      "ambiguous_writes": 14,
+      "confirmed_writes_checked": 1530,
+      "lost_confirmed_writes": 3,
+      "linearizable": "Illegal",
+      "converged": true,
+      "faults": {
+        "bridge": 1,
+        "isolate": 1,
+        "leader-zone": 3,
+        "one-way": 3
+      }
+    },
+    {
+      "run": 10,
+      "passed": false,
+      "seconds": 12.887160458,
+      "operations": 6010,
+      "acknowledged_writes": 3911,
+      "ambiguous_writes": 17,
+      "confirmed_writes_checked": 1566,
+      "lost_confirmed_writes": 2,
+      "linearizable": "Illegal",
+      "converged": true,
+      "faults": {
+        "bridge": 1,
+        "isolate": 1,
+        "kill": 1,
+        "one-way": 4
+      }
+    }
+  ]
+}

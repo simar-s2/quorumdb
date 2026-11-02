@@ -1,0 +1,264 @@
+{
+  "kind": "chaos",
+  "environment": "local",
+  "started_at": "2026-11-02T23:23:22.246401Z",
+  "wall_seconds": 258.801576917,
+  "settings": {
+    "clients": 8,
+    "registers": 4,
+    "counters": 2,
+    "fault_seconds_per_run": 10,
+    "snapshot_threshold": 200,
+    "seed": 1793661802246191000,
+    "node_flags": "-unsafe-local-reads"
+  },
+  "client": {
+    "os": "darwin/arm64",
+    "cpus": 10
+  },
+  "runs": 10,
+  "passed": 0,
+  "linearizability_violations": 10,
+  "porcupine_timeouts": 0,
+  "not_converged": 0,
+  "counter_failures": 1,
+  "final_read_failures": 0,
+  "setup_failures": 0,
+  "operations": 47218,
+  "acknowledged_writes": 30407,
+  "ambiguous_writes": 1073,
+  "successful_reads": 20907,
+  "failed_reads": 0,
+  "confirmed_writes_checked": 12185,
+  "lost_confirmed_writes": 5,
+  "faults": {
+    "bridge": 11,
+    "isolate": 8,
+    "kill": 8,
+    "leader-zone": 15,
+    "one-way": 15,
+    "pause": 10
+  },
+  "total_faults": 67,
+  "failover_milliseconds": {
+    "isolate": [
+      554.781,
+      576.427
+    ],
+    "kill": [
+      483.501,
+      451.656,
+      505.85,
+      415.465,
+      450.594,
+      551.567
+    ],
+    "leader-zone": [
+      496.286,
+      350.779,
+      581.607,
+      619.916,
+      344.544,
+      445.736,
+      573.582,
+      452.228,
+      418.062,
+      477.681
+    ],
+    "pause": [
+      349.111,
+      1025.755,
+      534.823,
+      456.9,
+      341.856,
+      398.567
+    ]
+  },
+  "failover_timeouts": {},
+  "per_run": [
+    {
+      "run": 1,
+      "passed": false,
+      "seconds": 14.70350125,
+      "operations": 3466,
+      "acknowledged_writes": 2278,
+      "ambiguous_writes": 50,
+      "confirmed_writes_checked": 922,
+      "lost_confirmed_writes": 0,
+      "linearizable": "Illegal",
+      "converged": true,
+      "faults": {
+        "bridge": 1,
+        "isolate": 1,
+        "leader-zone": 4,
+        "pause": 2
+      }
+    },
+    {
+      "run": 2,
+      "passed": false,
+      "seconds": 13.670291208,
+      "operations": 4401,
+      "acknowledged_writes": 2822,
+      "ambiguous_writes": 125,
+      "confirmed_writes_checked": 1109,
+      "lost_confirmed_writes": 0,
+      "linearizable": "Illegal",
+      "converged": true,
+      "faults": {
+        "isolate": 1,
+        "kill": 1,
+        "leader-zone": 1,
+        "one-way": 2,
+        "pause": 1
+      }
+    },
+    {
+      "run": 3,
+      "passed": false,
+      "seconds": 13.5521555,
+      "operations": 4618,
+      "acknowledged_writes": 3088,
+      "ambiguous_writes": 26,
+      "confirmed_writes_checked": 1201,
+      "lost_confirmed_writes": 0,
+      "linearizable": "Illegal",
+      "converged": true,
+      "faults": {
+        "isolate": 1,
+        "kill": 2,
+        "leader-zone": 1,
+        "one-way": 2
+      }
+    },
+    {
+      "run": 4,
+      "passed": false,
+      "seconds": 14.110769542,
+      "operations": 5281,
+      "acknowledged_writes": 3454,
+      "ambiguous_writes": 31,
+      "confirmed_writes_checked": 1366,
+      "lost_confirmed_writes": 1,
+      "linearizable": "Illegal",
+      "converged": true,
+      "faults": {
+        "bridge": 2,
+        "leader-zone": 1,
+        "one-way": 2,
+        "pause": 2
+      },
+      "error": "counter 1793661802246191000-004/c1 = 404, expected between 405 (acked) and 406 (acked + ambiguous); "
+    },
+    {
+      "run": 5,
+      "passed": false,
+      "seconds": 15.37666775,
+      "operations": 4579,
+      "acknowledged_writes": 2800,
+      "ambiguous_writes": 206,
+      "confirmed_writes_checked": 1070,
+      "lost_confirmed_writes": 0,
+      "linearizable": "Illegal",
+      "converged": true,
+      "faults": {
+        "isolate": 2,
+        "kill": 1,
+        "leader-zone": 1,
+        "one-way": 2,
+        "pause": 3
+      }
+    },
+    {
+      "run": 6,
+      "passed": false,
+      "seconds": 12.644308583,
+      "operations": 4533,
+      "acknowledged_writes": 3017,
+      "ambiguous_writes": 25,
+      "confirmed_writes_checked": 1225,
+      "lost_confirmed_writes": 1,
+      "linearizable": "Illegal",
+      "converged": true,
+      "faults": {
+        "bridge": 2,
+        "isolate": 1,
+        "leader-zone": 1,
+        "pause": 1
+      }
+    },
+    {
+      "run": 7,
+      "passed": false,
+      "seconds": 14.414956041,
+      "operations": 4911,
+      "acknowledged_writes": 3164,
+      "ambiguous_writes": 178,
+      "confirmed_writes_checked": 1268,
+      "lost_confirmed_writes": 0,
+      "linearizable": "Illegal",
+      "converged": true,
+      "faults": {
+        "bridge": 3,
+        "isolate": 2,
+        "kill": 1,
+        "leader-zone": 1,
+        "one-way": 1
+      }
+    },
+    {
+      "run": 8,
+      "passed": false,
+      "seconds": 13.074863083,
+      "operations": 3892,
+      "acknowledged_writes": 2563,
+      "ambiguous_writes": 32,
+      "confirmed_writes_checked": 1107,
+      "lost_confirmed_writes": 1,
+      "linearizable": "Illegal",
+      "converged": true,
+      "faults": {
+        "bridge": 1,
+        "kill": 1,
+        "leader-zone": 2,
+        "one-way": 1,
+        "pause": 1
+      }
+    },
+    {
+      "run": 9,
+      "passed": false,
+      "seconds": 132.83215825,
+      "operations": 5840,
+      "acknowledged_writes": 3553,
+      "ambiguous_writes": 324,
+      "confirmed_writes_checked": 1457,
+      "lost_confirmed_writes": 2,
+      "linearizable": "Illegal",
+      "converged": true,
+      "faults": {
+        "bridge": 1,
+        "kill": 2,
+        "leader-zone": 1,
+        "one-way": 3
+      }
+    },
+    {
+      "run": 10,
+      "passed": false,
+      "seconds": 14.420582458,
+      "operations": 5697,
+      "acknowledged_writes": 3668,
+      "ambiguous_writes": 76,
+      "confirmed_writes_checked": 1460,
+      "lost_confirmed_writes": 0,
+      "linearizable": "Illegal",
+      "converged": true,
+      "faults": {
+        "bridge": 1,
+        "leader-zone": 2,
+        "one-way": 2
+      }
+    }
+  ]
+}

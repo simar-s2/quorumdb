@@ -9,8 +9,6 @@
 [![Go 1.23+](https://img.shields.io/badge/Go-1.23%2B-00ADD8?style=flat&logo=go&logoColor=white)](go.mod)
 [![Redis compatible](https://img.shields.io/badge/Redis-compatible-DC382D?style=flat&logo=redis&logoColor=white)](internal/resp/resp.go)
 [![Google Cloud: 3 zones](https://img.shields.io/badge/Google_Cloud-3_zones-4285F4?style=flat&logo=googlecloud&logoColor=white)](infra/terraform/cluster.tf)
-[![Terraform](https://img.shields.io/badge/Terraform-1.6%2B-844FBA?style=flat&logo=terraform&logoColor=white)](infra/terraform)
-[![Server: no dependencies](https://img.shields.io/badge/server-no_dependencies-2ea44f?style=flat)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-3b82f6?style=flat)](LICENSE)
 
 <br>
@@ -21,217 +19,71 @@
 
 ## ✨ What it does
 
-- **Keeps three copies of everything.** Each time you save something, it's stored on three computers. You only get "OK" back once at least two of them have it safely on disk.
-- **Keeps going when a computer fails.** If one of the three crashes, freezes or loses its network connection, the other two carry on without it.
-- **Never gives you out-of-date data.** Whatever you read is always the latest saved version.
-- **Works with existing tools.** It speaks the same language as Redis, a popular database, so programs and tools built for Redis work with it.
-- **Runs in the cloud across three locations.** On Google Cloud, each of the three computers is in a different data center, so even a whole data center going down doesn't lose anything.
-- **Is tested by breaking it on purpose.** A "chaos test" crashes computers, freezes them and cuts their network while data is being saved, then checks that nothing was lost.
+- **Keeps three copies of everything.** You only get "OK" back once at least two of the three computers have saved your data.
+- **Keeps going when a computer fails.** If one crashes, freezes or loses its network, the other two carry on.
+- **Never gives you out-of-date data.**
+- **Works with Redis tools**, because it speaks the same language as Redis, a popular database.
+- **Runs on Google Cloud** with each computer in a different data center.
 
-I built the part that keeps the three computers in agreement myself, following a well-known method called Raft, without using a library for it.
+I built the part that keeps the three copies in agreement myself, following a method called Raft.
 
 ## 🔬 How it works
 
-The three computers (called nodes) work as a team. One of them is the **leader** and the other two are **followers**. Every change goes through the leader, which keeps a numbered list of all changes, called the log.
+One computer is the leader. When you save something, the leader sends it to the other two and replies "OK" once two of the three have it on disk. If the leader goes quiet for about half a second, the other two vote for a new leader. A computer that crashes reads its saved data when it comes back, then catches up on what it missed.
 
-What happens when you save something, for example `SET user:42 alice` ("remember that user 42 is alice"):
-
-1. You can send it to any of the three nodes. A follower simply passes it on to the leader.
-2. The leader adds it to its list and sends it to both followers.
-3. Each follower saves it to its disk and replies "got it".
-4. As soon as two of the three nodes have it saved, the change is safe, even if one node is lost. The leader replies "OK".
-5. All three nodes apply the change, so they all end up with the same data.
-
-What happens when something goes wrong:
-
-- **The leader goes silent.** The leader sends a short "I'm still here" message 20 times a second. If the followers hear nothing for 0.3 to 0.6 seconds, they hold a vote and pick a new leader. Only a node that has every saved change can win, so nothing saved is ever lost.
-- **A node crashes and comes back.** It reads what it saved on its disk and then catches up on anything it missed while it was down.
-- **An old leader doesn't know it was replaced.** Before answering any question, the leader checks that the other nodes still follow it. An old leader can't pass this check, so it can never answer with out-of-date data.
-
-On Google Cloud, each node runs in a different data center (Google calls them zones) and has its own disk. The setup is described in code with Terraform (for the cloud machines and network) and Kubernetes (for running and restarting the program), so anyone can rebuild it with one command.
-
-More detail, the choices I made, and the problems I ran into: [DESIGN.md](DESIGN.md).
+More detail, and the choices I made: [DESIGN.md](DESIGN.md).
 
 ## 📊 Results
 
-Every number here comes from a real test run saved in the [`results/`](results/) folder, and `make results` turns those files into these tables. Results from my laptop and from Google Cloud are kept separate, because the two are very different:
-
-- **On the laptop**, all three nodes and the test program share one computer and one disk.
-- **On Google Cloud**, every change has to travel between data centers and be saved to network disks, which takes longer.
-
-How to read the numbers:
-
-- **Requests per second:** how many saves (SET) or reads (GET) the database handled each second. Higher is better.
-- **Typical time / slow time:** how long one request took, in milliseconds (thousandths of a second). "Typical" is the middle request; "slow" is the slowest 1 in 100. Lower is better.
-- **One at a time / 16 at a time:** whether the test sent each request and waited for the answer, or sent 16 together.
+The chaos test breaks things on purpose while data is being saved: it crashes computers, freezes them and cuts their network, 100 times. Then it checks that nothing was lost and every answer was right. All numbers come from the files in [`results/`](results/).
 
 <!-- results:begin (generated by `make results` from results/*.json; do not edit by hand) -->
 
-### Speed test
+**Chaos test**
 
-#### On my laptop
-
-| Sent to | Requests | Type | Requests per second | Typical time | Slow time (1 in 100) |
-|---|---|---|---:|---:|---:|
-| Leader | one at a time | Save (`SET`) | 25,294 (24,390–25,471) | 1.58 ms | 7.21 (6.37–7.29) ms |
-| Leader | one at a time | Read (`GET`) | 82,169 (81,400–82,338) | 0.44 ms | 1.68 (1.66–1.78) ms |
-| Leader | 16 at a time | Save (`SET`) | 167,504 (153,257–173,461) | 3.62 ms | 14.86 (13.05–19.63) ms |
-| Leader | 16 at a time | Read (`GET`) | 1,117,318 (956,938–1,162,791) | 0.51 ms | 2.12 (1.79–2.69) ms |
-| Follower (passes it to the leader) | one at a time | Save (`SET`) | 19,606 (19,562–20,511) | 2.08 ms | 8.07 (7.84–8.14) ms |
-| Follower (passes it to the leader) | one at a time | Read (`GET`) | 42,689 (41,710–43,169) | 0.98 ms | 3.37 (3.13–3.94) ms |
-
-Each number is the middle result of 3 runs, with the lowest and highest in brackets. Each run sent 200,000 requests from 50 connections at once, using `redis-benchmark 8.0.4`.
-Where: MacBook Pro (MacBookPro18,3), Apple M1 Pro, 10 cores, 32 GB, macOS 26.6.2, on AC power with macOS Low Power Mode on; Docker Desktop 28.3.3, VM with 10 CPUs and 7.7 GiB; all nodes and the client on this one machine.
-Measured on 2026-10-29. The leader changed during 0 of 18 runs. Raw data: `results/local/benchmark.json`.
-
-#### On Google Cloud (three data centers)
-
-Not run yet. `make gke-bench` saves the results to `results/gke/benchmark.json`.
-
-### Chaos test
-
-| | On my laptop | On Google Cloud (three data centers) |
+| | On my laptop | On Google Cloud |
 |---|---|---|
 | Runs where every check passed | **100 / 100** | not run yet |
-| Wrong answers found by the checker | **0** | not run yet |
-| Saves that got "OK" but were lost | **0** of 87,994 checked | not run yet |
-| Saves that got "OK" | 219,698 | not run yet |
-| Saves with no answer, because a problem hit mid-request (allowed either way) | 2,105 | not run yet |
-| Reads checked | 147,802 | not run yet |
-| Runs where all three nodes ended with the same data | 100 / 100 | not run yet |
-| Problems caused on purpose | 626: 87 crashes, 97 freezes, 88 nodes cut off, 90 leader's data center cut off, 83 links between two nodes cut, 181 one-way cuts | not run yet |
-| Time to pick a new leader after the leader crashed | 467 ms typical, 954 ms slowest (51 times) | not run yet |
-| Time to pick a new leader after the leader froze | 494 ms typical, 864 ms slowest (58 times) | not run yet |
-| Time to pick a new leader after the leader was cut off | 509 ms typical, 1,091 ms slowest (49 times) | not run yet |
-| Time to pick a new leader after the leader's data center was cut off | 490 ms typical, 1,109 ms slowest (73 times) | not run yet |
-| Time spent breaking things | 10 s per run, 23 min in total | not run yet |
-| Measured on | 2026-10-29, a Mac with Apple Silicon with 10 CPUs | not run yet |
+| Saves that got "OK" but were lost | **0** of 87,994 | not run yet |
+| Wrong answers found | **0** | not run yet |
+| Problems caused on purpose | 626 | not run yet |
+| Time to pick a new leader | 489 ms typical, 1,109 ms slowest | not run yet |
 
-"Time to pick a new leader" runs from the moment the problem was caused until another node answered as the new leader. It is only measured when nothing else was broken at the same time. On Google Cloud it also includes the time Kubernetes takes to apply the problem, so the real times are a little shorter. Raw data, with every run and every time: `results/local/chaos.json` and `results/gke/chaos.json`.
+To check the test itself, I also ran it against two versions I broke on purpose. It caught them in 10 of 10 runs and 10 of 10 runs.
 
-#### Does the test catch real bugs?
+**Speed test**
 
-The same chaos test, on my laptop, against two versions I broke on purpose (`make chaos-negative`). Every run should fail.
+| | On my laptop | On Google Cloud |
+|---|---|---|
+| Saves per second | 25,294 | not run yet |
+| Reads per second | 82,169 | not run yet |
+| Saves per second, sending 16 at a time | 167,504 | not run yet |
+| Typical time for one save | 1.58 ms | not run yet |
+| Typical time for one read | 0.44 ms | not run yet |
 
-| Broken version | Runs | Runs where the checker found wrong answers | Saves that got "OK" but were missing when read back |
-|---|---:|---:|---:|
-| `-unsafe-local-reads`: answers reads without checking it is still the leader | 10 | 10 | 5 of 12,185 checked |
-| `-unsafe-early-ack`: says OK before a save is on two nodes | 10 | 10 | 10 of 12,469 checked |
-
-With the first broken version, the missing saves are not really gone: a node with old data answered the read, so they looked missing. With the second, the database said "OK" before the save was safe, so some really were lost.
+Middle result of 3 runs of `redis-benchmark`, sent to the leader from 50 connections. The files in [`results/`](results/) have every run, the slowest times and the full setup.
 
 <!-- results:end -->
 
 ## ⚡️ Run it
 
-You need Docker installed.
+With Docker installed:
 
 ```bash
-git clone https://github.com/simar-s2/quorumdb && cd quorumdb
-make cluster-up          # start the three nodes and wait until they pick a leader
+make cluster-up                        # start the three computers
+redis-cli -p 6379 SET user:42 alice    # save on one
+redis-cli -p 6381 GET user:42          # read from another: "alice"
+make kill-leader                       # crash the leader; a new one takes over
+make chaos                             # run the chaos test
 ```
 
-<p align="center">
-  <img src="docs/images/cluster-startup.gif" width="640" alt="Three nodes start and pick a leader.">
-</p>
-
-Save something on one node and read it from another:
-
-```bash
-redis-cli -p 6379 SET user:42 alice
-redis-cli -p 6381 GET user:42          # "alice"
-make cluster-status                    # which node is the leader
-```
-
-Shut down the leader and watch a new one take over:
-
-```bash
-make kill-leader                       # stop the leader instantly, like a power cut
-make cluster-status                    # a new leader was picked
-docker compose start                   # the old leader comes back and catches up
-```
-
-Run the same tests as in the results above:
-
-```bash
-make bench                             # speed test, saved to results/local/benchmark.json
-make chaos                             # 100 chaos runs (RUNS=5 for a quick one), saved to results/local/chaos.json
-make cluster-down                      # stop everything and delete the data
-```
-
-## ☁️ Run it on Google Cloud
-
-One command builds everything on Google Cloud: the network, a place to store the program, and a cluster with one small computer in each of three data centers, plus one more computer that runs the tests. You need the Google Cloud command line (`gcloud`), Terraform, `kubectl` and Docker.
-
-1. Log in and choose a project:
-
-   ```bash
-   gcloud auth login
-   gcloud auth application-default login
-   gcloud config set project YOUR_PROJECT
-   gcloud components install gke-gcloud-auth-plugin
-   ```
-
-2. Make a storage bucket where Terraform keeps track of what it built (only once): `make gke-state-bucket`.
-3. Build everything and start the database: `make up`. Terraform first shows what it will create and asks you to confirm.
-4. Check it's running: `make gke-status` shows each node, its data center and whether it's the leader.
-5. Run a short chaos test first: `make gke-chaos RUNS=5`. When the leader's data center is cut off, a new leader should be picked every time. If not, the network cuts aren't working ([details](DESIGN.md#running-it-on-google-cloud-for-the-first-time)).
-6. Run the full tests: `make gke-chaos` (100 runs) and `make gke-bench`. The results are saved in `results/gke/`, and `make results` adds them to the tables above.
-7. Delete everything: `make down`. It deletes the database disks first, then everything else.
-
-This costs money while it's running, so run `make down` as soon as you're done. What it costs and how to check nothing is left: [DESIGN.md](DESIGN.md#cost-and-cleanup).
-
-## 🧪 How it's tested
-
-**The chaos test.** Each of the 100 runs starts with a healthy cluster. Eight test clients save and read data as fast as they can, and for 10 seconds the test keeps breaking things:
-
-- **Crashing a node** instantly, like pulling its power cord. Half the time it's the leader.
-- **Freezing a node** and unfreezing it a few seconds later. A frozen leader wakes up still thinking it's in charge, which is a classic way for databases to give wrong answers.
-- **Cutting the network:** cutting one node off from the others, cutting the link between two nodes, cutting traffic in one direction only, or cutting off the leader's whole data center.
-
-Sometimes two problems happen at once and no two nodes can talk to each other. Then the test fixes everything and checks:
-
-- **Nothing that got "OK" was lost.** Some saves go to keys that are written only once. At the end, every one of them that got "OK" is read back.
-- **Every answer was correct.** A tool called [porcupine](https://github.com/anishathalye/porcupine) replays every request and answer and checks that a correct database could have given them. A lost save or an out-of-date read fails the run.
-- **All three nodes ended up with the same data.**
-- **How quickly a new leader was picked** after the old one was taken out.
-
-To make sure the checks really catch problems, `make chaos-negative` runs the same test against two versions I broke on purpose. Every one of their runs should fail, and the table above shows whether they did.
-
-<p align="center">
-  <img src="docs/images/chaos.gif" width="640" alt="A short chaos test: each line is one run, with what was broken and whether every check passed.">
-</p>
-
-**The speed test.** The standard Redis speed test tool (`redis-benchmark`) sends 200,000 saves and 200,000 reads from 50 connections at once. It runs against the leader one request at a time, then 16 at a time, and then against a follower, which has to pass everything on to the leader. Each test runs three times.
+To run it on Google Cloud, see [the steps in DESIGN.md](DESIGN.md#running-it-on-google-cloud-for-the-first-time).
 
 ## 💡 Things I learned
 
-- **Deleting a program in Kubernetes isn't the same as a crash.** Kubernetes politely asks the program to stop first, so it saves everything and exits cleanly. To test a real crash, the chaos test kills the program instantly and only then lets Kubernetes replace it.
-- **Some programs can't be frozen.** Linux won't freeze or kill the first program in a container from inside it. Starting the database under a tiny helper program (tini) makes it freezable.
-- **Network rules add up instead of overriding each other.** Two "block" rules on the same node each let through what the other blocks. The test keeps just one rule per node that lists everything that's cut.
-- **Check that the problem you caused really happened.** On a test cluster on my laptop, cutting the network blocked new connections but not ones that were already open, so the leader never noticed it was cut off. Measuring how long a new leader took to appear is what revealed it.
-- **Test the old version before blaming the new one.** My laptop results dropped after these changes. The old version turned out to be just as slow, because the laptop's Low Power Mode was on.
-- **Waiting a fixed time can block things for good.** An early version gave up on sending a big backup to a lagging node after 30 seconds, which left that node stuck long after the network was fixed. The chaos test caught it, and the wait now grows with the size of the backup.
-
-## 🛠️ Development
-
-```bash
-make test             # unit and integration tests
-make test-race        # the same, also checking for threading bugs
-make chaos-negative   # the chaos test against the broken versions
-make results          # rebuild the results tables from results/*.json
-```
-
-| Folder | What's in it |
-|---|---|
-| `internal/raft` | how the nodes agree: picking a leader, copying changes, saving to disk, backups |
-| `internal/server` | the part that talks to Redis tools and passes requests to the leader |
-| `cmd/chaos` | the chaos test, for the laptop or for Google Cloud |
-| `cmd/benchmark`, `cmd/results` | the speed test, and the tool that builds the results tables |
-| `infra/terraform` | the Google Cloud setup |
-| `deploy/k8s` | the Kubernetes setup |
-
-It supports Redis's basic commands for text values: `GET`, `SET`, `MGET`, `MSET`, `DEL`, `EXISTS`, `INCR`, `DECR`, `EXPIRE`, `TTL` and a few more. Not done yet: adding or removing nodes while it runs, reading from followers, and other Redis data types such as lists.
+- **Check that the problem you caused really happened.** In one test setup, cutting the network didn't affect connections that were already open, so the leader never noticed. Timing how long a new leader took to appear is what revealed it.
+- **Test the old version before blaming the new one.** My speed results dropped after a change. The old version was just as slow: the laptop's Low Power Mode was on.
+- **A crash test has to be a real crash.** Asking a program to stop lets it save everything first. To test crash recovery, the test has to kill it instantly.
 
 ## 📄 License
 

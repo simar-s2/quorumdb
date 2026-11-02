@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/simar-s2/quorumdb/internal/results"
 )
 
 func TestFormatCount(t *testing.T) {
@@ -15,12 +17,14 @@ func TestFormatCount(t *testing.T) {
 	}
 }
 
-func TestWithRange(t *testing.T) {
-	if got := withRange([]float64{3, 1, 2}, formatCount); got != "2 (1–3)" {
-		t.Errorf("got %q", got)
+func TestDescribeFailovers(t *testing.T) {
+	c := &results.Chaos{
+		FailoverMilliseconds: map[string][]float64{"kill": {400, 600}, "leader-zone": {500, 1200}},
+		FailoverTimeouts:     map[string]int{"leader-zone": 1},
 	}
-	if got := withRange([]float64{5}, formatCount); got != "5" {
-		t.Errorf("a single value should have no range, got %q", got)
+	want := "550 ms typical, 1,200 ms slowest, **1 times no new leader within 10 s**"
+	if got := describeFailovers(c); got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
 

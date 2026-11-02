@@ -16,16 +16,10 @@ import (
 	"github.com/simar-s2/quorumdb/internal/results"
 )
 
-// environment is where results come from: a directory of JSON files, and how to title each kind.
-type environment struct {
-	directory      string
-	benchmarkTitle string
-	chaosTitle     string
-}
-
-var environments = []environment{
-	{directory: "local", benchmarkTitle: "On my laptop", chaosTitle: "On my laptop"},
-	{directory: "gke", benchmarkTitle: "On Google Cloud (three data centers)", chaosTitle: "On Google Cloud (three data centers)"},
+// Each table has one column per place the tests ran, read from results/<directory>/.
+var columns = []struct{ directory, title string }{
+	{"local", "On my laptop"},
+	{"gke", "On Google Cloud"},
 }
 
 // The README section between these lines is replaced by the generated tables.
@@ -53,40 +47,41 @@ func main() {
 }
 
 func buildTables(directory string) (string, error) {
-	var out strings.Builder
-	out.WriteString("### Speed test\n\n")
-	for _, env := range environments {
-		var benchmark results.Benchmark
-		found, err := load(filepath.Join(directory, env.directory, "benchmark.json"), &benchmark)
-		if err != nil {
-			return "", err
-		}
-		fmt.Fprintf(&out, "#### %s\n\n", env.benchmarkTitle)
-		if !found {
-			fmt.Fprintf(&out, "Not run yet. `make %s` saves the results to `results/%s/benchmark.json`.\n\n", map[string]string{"local": "bench", "gke": "gke-bench"}[env.directory], env.directory)
-			continue
-		}
-		writeBenchmarkTable(&out, benchmark)
-	}
-
-	out.WriteString("### Chaos test\n\n")
-	var chaosByEnvironment []*results.Chaos
-	for _, env := range environments {
-		var chaos results.Chaos
-		found, err := load(filepath.Join(directory, env.directory, "chaos.json"), &chaos)
+	// One chaos and one benchmark file per column; nil means that test has not run there yet.
+	var chaos []*results.Chaos
+	var benchmarks []*results.Benchmark
+	for _, column := range columns {
+		var c results.Chaos
+		found, err := load(filepath.Join(directory, column.directory, "chaos.json"), &c)
 		if err != nil {
 			return "", err
 		}
 		if found {
-			chaosByEnvironment = append(chaosByEnvironment, &chaos)
+			chaos = append(chaos, &c)
 		} else {
-			chaosByEnvironment = append(chaosByEnvironment, nil)
+			chaos = append(chaos, nil)
+		}
+
+		var b results.Benchmark
+		found, err = load(filepath.Join(directory, column.directory, "benchmark.json"), &b)
+		if err != nil {
+			return "", err
+		}
+		if found {
+			benchmarks = append(benchmarks, &b)
+		} else {
+			benchmarks = append(benchmarks, nil)
 		}
 	}
-	writeChaosTable(&out, chaosByEnvironment)
+
+	var out strings.Builder
+	out.WriteString("**Chaos test**\n\n")
+	writeChaosTable(&out, chaos)
 	if err := writeNegativeControls(&out, filepath.Join(directory, "local")); err != nil {
 		return "", err
 	}
+	out.WriteString("\n**Speed test**\n\n")
+	writeBenchmarkTable(&out, benchmarks)
 	return out.String(), nil
 }
 
@@ -101,103 +96,138 @@ func load(path string, value any) (bool, error) {
 	return true, nil
 }
 
-// --- Benchmarks ---
+// writeTable writes one row per label and one column per place, with "not run yet" for a missing file.
+func writeTable[T any](out *strings.Builder, files []*T, labels []string, value func(row int, file *T) string) {
+	out.WriteString("| |")
+	for _, column := range columns {
+		fmt.Fprintf(out, " %s |", column.title)
+	}
+	out.WriteString("\n|---|" + strings.Repeat("---|", len(columns)) + "\n")
+	for row, label := range labels {
+		fmt.Fprintf(out, "| %s |", label)
+		for _, file := range files {
+			if file == nil {
+				out.WriteString(" not run yet |")
+			} else {
+				fmt.Fprintf(out, " %s |", value(row, file))
+			}
+		}
+		out.WriteString("\n")
+	}
+}
 
-// benchmarkRow is one row of the table: the same target, pipeline and command across all repeats.
+func writeChaosTable(out *strings.Builder, chaos []*results.Chaos) {
+	labels := []string{
+		"Runs where every check passed",
+		"Saves that got \"OK\" but were lost",
+		"Wrong answers found",
+		"Problems caused on purpose",
+		"Time to pick a new leader",
+	}
+	writeTable(out, chaos, labels, func(row int, c *results.Chaos) string {
+		switch row {
+		case 0:
+			return fmt.Sprintf("**%d / %d**", c.Passed, c.Runs)
+		case 1:
+			return fmt.Sprintf("**%s** of %s", formatCount(float64(c.LostConfirmedWrites)), formatCount(float64(c.ConfirmedWritesChecked)))
+		case 2:
+			return fmt.Sprintf("**%d**", c.LinearizabilityViolations)
+		case 3:
+			return formatCount(float64(c.TotalFaults))
+		default:
+			return describeFailovers(c)
+		}
+	})
+}
+
+// describeFailovers combines every timed failover in a chaos summary: "492 ms typical, 1,109 ms slowest".
+func describeFailovers(c *results.Chaos) string {
+	var all []float64
+	timeouts := 0
+	for _, milliseconds := range c.FailoverMilliseconds {
+		all = append(all, milliseconds...)
+	}
+	for _, count := range c.FailoverTimeouts {
+		timeouts += count
+	}
+	text := "not measured"
+	if len(all) > 0 {
+		text = fmt.Sprintf("%s ms typical, %s ms slowest", formatCount(results.Median(all)), formatCount(slices.Max(all)))
+	}
+	if timeouts > 0 {
+		text += fmt.Sprintf(", **%d times no new leader within 10 s**", timeouts)
+	}
+	return text
+}
+
+// writeNegativeControls says whether the chaos test caught the two builds broken on purpose
+// (make chaos-negative). It writes nothing until both have been run.
+func writeNegativeControls(out *strings.Builder, directory string) error {
+	var caught []string
+	for _, file := range []string{"chaos-unsafe-local-reads.json", "chaos-unsafe-early-ack.json"} {
+		var c results.Chaos
+		found, err := load(filepath.Join(directory, file), &c)
+		if err != nil {
+			return err
+		}
+		if found {
+			caught = append(caught, fmt.Sprintf("%d of %d runs", c.Runs-c.Passed, c.Runs))
+		}
+	}
+	if len(caught) == 2 {
+		fmt.Fprintf(out, "\nTo check the test itself, I also ran it against two versions I broke on purpose. It caught them in %s and %s.\n",
+			caught[0], caught[1])
+	}
+	return nil
+}
+
+// benchmarkRow is one row of the speed table: the middle result of every run sent to the leader with
+// this pipeline depth and command.
 type benchmarkRow struct {
-	target   string
-	pipeline int
-	test     string
+	label        string
+	pipeline     int
+	test         string
+	showsLatency bool // the typical time per request instead of requests per second
 }
 
 var benchmarkRows = []benchmarkRow{
-	{"leader", 1, "SET"}, {"leader", 1, "GET"},
-	{"leader", 16, "SET"}, {"leader", 16, "GET"},
-	{"follower", 1, "SET"}, {"follower", 1, "GET"},
+	{"Saves per second", 1, "SET", false},
+	{"Reads per second", 1, "GET", false},
+	{"Saves per second, sending 16 at a time", 16, "SET", false},
+	{"Typical time for one save", 1, "SET", true},
+	{"Typical time for one read", 1, "GET", true},
 }
 
-func writeBenchmarkTable(out *strings.Builder, benchmark results.Benchmark) {
-	out.WriteString("| Sent to | Requests | Type | Requests per second | Typical time | Slow time (1 in 100) |\n")
-	out.WriteString("|---|---|---|---:|---:|---:|\n")
+func writeBenchmarkTable(out *strings.Builder, benchmarks []*results.Benchmark) {
+	var labels []string
 	for _, row := range benchmarkRows {
-		var requestsPerSecond, p50, p99 []float64
-		for _, run := range benchmark.Runs {
-			if run.Target == row.target && run.Pipeline == row.pipeline && run.Test == row.test {
-				requestsPerSecond = append(requestsPerSecond, run.RequestsPerSecond)
-				p50 = append(p50, run.P50Ms)
-				p99 = append(p99, run.P99Ms)
+		labels = append(labels, row.label)
+	}
+	writeTable(out, benchmarks, labels, func(index int, b *results.Benchmark) string {
+		row := benchmarkRows[index]
+		var values []float64
+		for _, run := range b.Runs {
+			if run.Target != "leader" || run.Pipeline != row.pipeline || run.Test != row.test {
+				continue
+			}
+			if row.showsLatency {
+				values = append(values, run.P50Ms)
+			} else {
+				values = append(values, run.RequestsPerSecond)
 			}
 		}
-		if len(requestsPerSecond) == 0 {
-			continue
+		switch {
+		case len(values) == 0:
+			return "-"
+		case row.showsLatency:
+			return fmt.Sprintf("%.2f ms", results.Median(values))
+		default:
+			return formatCount(results.Median(values))
 		}
-		target := "Leader"
-		if row.target == "follower" {
-			target = "Follower (passes it to the leader)"
-		}
-		requests := fmt.Sprintf("%d at a time", row.pipeline)
-		if row.pipeline == 1 {
-			requests = "one at a time"
-		}
-		kind := map[string]string{"SET": "Save (`SET`)", "GET": "Read (`GET`)"}[row.test]
-		fmt.Fprintf(out, "| %s | %s | %s | %s | %.2f ms | %s ms |\n", target, requests, kind,
-			withRange(requestsPerSecond, formatCount), results.Median(p50), withRange(p99, formatMilliseconds))
-	}
-	out.WriteString("\n")
-
-	s := benchmark.Settings
-	repeats := fmt.Sprintf("Each number is the middle result of %d runs, with the lowest and highest in brackets.", s.Repeats)
-	if s.Repeats == 1 {
-		repeats = "Each number is from one run."
-	}
-	fmt.Fprintf(out, "%s Each run sent %s requests from %d connections at once, using `%s`.\n",
-		repeats, formatCount(float64(s.Requests)), s.Clients, s.RedisBenchmarkVersion)
-	if benchmark.Description != "" {
-		fmt.Fprintf(out, "Where: %s.\n", strings.TrimSuffix(benchmark.Description, "."))
-	}
-	if placement := describePlacement(benchmark); placement != "" {
-		fmt.Fprintf(out, "%s\n", placement)
-	}
-	leaderChanges := 0
-	for _, run := range benchmark.Runs {
-		if run.LeaderChanged {
-			leaderChanges++
-		}
-	}
-	fmt.Fprintf(out, "Measured on %s. The leader changed during %d of %d runs. Raw data: `results/%s/benchmark.json`.\n\n",
-		benchmark.StartedAt.Format("2006-01-02"), leaderChanges, len(benchmark.Runs), benchmark.Environment)
+	})
+	out.WriteString("\nMiddle result of 3 runs of `redis-benchmark`, sent to the leader from 50 connections. " +
+		"The files in [`results/`](results/) have every run, the slowest times and the full setup.\n")
 }
-
-// describePlacement says which zone the client, the leader and the follower were in (GKE only).
-func describePlacement(benchmark results.Benchmark) string {
-	zoneOf := map[string]string{}
-	machineType := ""
-	for _, node := range benchmark.Nodes {
-		zoneOf[node.ID] = node.Zone
-		machineType = node.MachineType
-	}
-	if benchmark.Client.Zone == "" {
-		return ""
-	}
-	targets := map[string]string{}
-	for _, run := range benchmark.Runs {
-		targets[run.Target] = run.Node
-	}
-	return fmt.Sprintf("Each node is a %s computer in its own data center. The test ran from a separate %s computer in %s. "+
-		"The leader was %s in %s, and the follower was %s in %s.",
-		machineType, benchmark.Client.MachineType, benchmark.Client.Zone,
-		targets["leader"], zoneOf[targets["leader"]], targets["follower"], zoneOf[targets["follower"]])
-}
-
-// withRange formats the median, then the lowest and highest values: "38,292 (36,969–38,395)".
-func withRange(values []float64, format func(float64) string) string {
-	if len(values) == 1 {
-		return format(values[0])
-	}
-	return fmt.Sprintf("%s (%s–%s)", format(results.Median(values)), format(slices.Min(values)), format(slices.Max(values)))
-}
-
-func formatMilliseconds(value float64) string { return fmt.Sprintf("%.2f", value) }
 
 // formatCount rounds to a whole number with thousands separators: 1428571.4 -> "1,428,571".
 func formatCount(value float64) string {
@@ -210,152 +240,6 @@ func formatCount(value float64) string {
 		grouped.WriteRune(digit)
 	}
 	return grouped.String()
-}
-
-// --- Chaos ---
-
-func writeChaosTable(out *strings.Builder, chaos []*results.Chaos) {
-	out.WriteString("| |")
-	for _, env := range environments {
-		fmt.Fprintf(out, " %s |", env.chaosTitle)
-	}
-	out.WriteString("\n|---|")
-	for range environments {
-		out.WriteString("---|")
-	}
-	out.WriteString("\n")
-
-	// row prints one line of the table, with the value for each environment, or "not run yet".
-	row := func(label string, value func(c *results.Chaos) string) {
-		fmt.Fprintf(out, "| %s |", label)
-		for _, c := range chaos {
-			if c == nil {
-				out.WriteString(" not run yet |")
-			} else {
-				fmt.Fprintf(out, " %s |", value(c))
-			}
-		}
-		out.WriteString("\n")
-	}
-	count := func(n int) string { return formatCount(float64(n)) }
-
-	row("Runs where every check passed", func(c *results.Chaos) string { return fmt.Sprintf("**%d / %d**", c.Passed, c.Runs) })
-	row("Wrong answers found by the checker", func(c *results.Chaos) string { return fmt.Sprintf("**%d**", c.LinearizabilityViolations) })
-	row("Saves that got \"OK\" but were lost", func(c *results.Chaos) string {
-		return fmt.Sprintf("**%s** of %s checked", count(c.LostConfirmedWrites), count(c.ConfirmedWritesChecked))
-	})
-	row("Saves that got \"OK\"", func(c *results.Chaos) string { return count(c.AcknowledgedWrites) })
-	row("Saves with no answer, because a problem hit mid-request (allowed either way)", func(c *results.Chaos) string { return count(c.AmbiguousWrites) })
-	row("Reads checked", func(c *results.Chaos) string { return count(c.SuccessfulReads) })
-	row("Runs where all three nodes ended with the same data", func(c *results.Chaos) string {
-		checked := c.Runs - c.SetupFailures
-		return fmt.Sprintf("%d / %d", checked-c.NotConverged, checked)
-	})
-	row("Problems caused on purpose", func(c *results.Chaos) string {
-		var kinds []string
-		for _, kind := range []string{"kill", "pause", "isolate", "leader-zone", "bridge", "one-way"} {
-			if c.Faults[kind] > 0 {
-				kinds = append(kinds, fmt.Sprintf("%d %s", c.Faults[kind], faultNames[kind]))
-			}
-		}
-		return fmt.Sprintf("%s: %s", count(c.TotalFaults), strings.Join(kinds, ", "))
-	})
-	for _, kind := range []string{"kill", "pause", "isolate", "leader-zone"} {
-		label := map[string]string{
-			"kill":        "Time to pick a new leader after the leader crashed",
-			"pause":       "Time to pick a new leader after the leader froze",
-			"isolate":     "Time to pick a new leader after the leader was cut off",
-			"leader-zone": "Time to pick a new leader after the leader's data center was cut off",
-		}[kind]
-		row(label, func(c *results.Chaos) string {
-			samples := c.FailoverMilliseconds[kind]
-			if len(samples) == 0 {
-				return fmt.Sprintf("not measured (%d times no new leader within 10 s)", c.FailoverTimeouts[kind])
-			}
-			text := fmt.Sprintf("%s ms typical, %s ms slowest (%d times)", formatCount(results.Median(samples)), formatCount(slices.Max(samples)), len(samples))
-			if timeouts := c.FailoverTimeouts[kind]; timeouts > 0 {
-				text += fmt.Sprintf(", **%d times no new leader within 10 s**", timeouts)
-			}
-			return text
-		})
-	}
-	row("Time spent breaking things", func(c *results.Chaos) string {
-		return fmt.Sprintf("%.0f s per run, %.0f min in total", c.Settings.FaultSecondsPerRun, c.WallSeconds/60)
-	})
-	row("Measured on", func(c *results.Chaos) string {
-		where := fmt.Sprintf("%s with %d CPUs", plainOS(c.Client.OS), c.Client.CPUs)
-		if len(c.Nodes) > 0 {
-			var zones []string
-			for _, node := range c.Nodes {
-				zones = append(zones, node.Zone)
-			}
-			where = fmt.Sprintf("%s computers in %s", c.Nodes[0].MachineType, strings.Join(zones, ", "))
-		}
-		return fmt.Sprintf("%s, %s", c.StartedAt.Format("2006-01-02"), where)
-	})
-	out.WriteString("\n\"Time to pick a new leader\" runs from the moment the problem was caused until another node answered as the new leader. " +
-		"It is only measured when nothing else was broken at the same time. On Google Cloud it also includes the time Kubernetes takes to apply the problem, " +
-		"so the real times are a little shorter. Raw data, with every run and every time: `results/local/chaos.json` and `results/gke/chaos.json`.\n")
-}
-
-// plainOS turns Go's operating system name, like darwin/arm64, into plain words.
-func plainOS(os string) string {
-	switch os {
-	case "darwin/arm64":
-		return "a Mac with Apple Silicon"
-	case "darwin/amd64":
-		return "an Intel Mac"
-	}
-	return "a " + os + " computer"
-}
-
-// faultNames describes each kind of fault in plain words.
-var faultNames = map[string]string{
-	"kill":        "crashes",
-	"pause":       "freezes",
-	"isolate":     "nodes cut off",
-	"leader-zone": "leader's data center cut off",
-	"bridge":      "links between two nodes cut",
-	"one-way":     "one-way cuts",
-}
-
-// negativeControls are the deliberately broken builds of make chaos-negative, which the checks
-// must catch. They only run locally, because they need extra flags on the node processes.
-var negativeControls = []struct{ flag, file, meaning string }{
-	{"-unsafe-local-reads", "chaos-unsafe-local-reads.json", "answers reads without checking it is still the leader"},
-	{"-unsafe-early-ack", "chaos-unsafe-early-ack.json", "says OK before a save is on two nodes"},
-}
-
-func writeNegativeControls(out *strings.Builder, directory string) error {
-	out.WriteString("\n#### Does the test catch real bugs?\n\n")
-	out.WriteString("The same chaos test, on my laptop, against two versions I broke on purpose (`make chaos-negative`). Every run should fail.\n\n")
-	out.WriteString("| Broken version | Runs | Runs where the checker found wrong answers | Saves that got \"OK\" but were missing when read back |\n")
-	out.WriteString("|---|---:|---:|---:|\n")
-	for _, control := range negativeControls {
-		var chaos results.Chaos
-		found, err := load(filepath.Join(directory, control.file), &chaos)
-		if err != nil {
-			return err
-		}
-		if !found {
-			fmt.Fprintf(out, "| `%s`: %s | not run yet | | |\n", control.flag, control.meaning)
-			continue
-		}
-		fmt.Fprintf(out, "| `%s`: %s | %d | %d | %s of %s checked |\n", control.flag, control.meaning, chaos.Runs,
-			chaos.LinearizabilityViolations, formatCount(float64(chaos.LostConfirmedWrites)), formatCount(float64(chaos.ConfirmedWritesChecked)))
-	}
-	out.WriteString("\nWith the first broken version, the missing saves are not really gone: a node with old data answered the read, so they looked missing. " +
-		"With the second, the database said \"OK\" before the save was safe, so some really were lost.\n")
-	return nil
-}
-
-func sortedKeys(m map[string]int) []string {
-	keys := make([]string, 0, len(m))
-	for key := range m {
-		keys = append(keys, key)
-	}
-	slices.Sort(keys)
-	return keys
 }
 
 // replaceSection swaps the text between the markers in path for content.

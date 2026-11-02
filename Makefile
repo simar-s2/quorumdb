@@ -3,7 +3,7 @@ RUNS  ?= 100
 CHAOS_DURATION ?= 10s
 
 .PHONY: build test test-race vet cluster-up cluster-down cluster-status kill-leader bench chaos chaos-negative clean help \
-	gke-state-bucket up deploy down gke-status gke-bench gke-chaos results
+	gke-state-bucket up deploy down gke-status gke-kill-leader gke-bench gke-chaos results
 
 build: ## Build the node binary and the chaos harness into ./bin
 	$(GO) build -o bin/quorumdb ./cmd/quorumdb
@@ -85,6 +85,9 @@ deploy: ## Build and push the image, then apply the Kubernetes manifests and wai
 
 gke-status: ## Show each GKE pod's zone, role, term and log position
 	@$(GKE_ENV) scripts/gke-status.sh
+
+gke-kill-leader: ## Crash the GKE leader pod to watch another zone take over
+	@$(GKE_ENV) scripts/gke-kill-leader.sh
 
 gke-bench: ## Run the benchmark Job in the GKE cluster (default node settings); saves results/gke/benchmark.json
 	$(GKE_ENV) scripts/gke-deploy.sh base

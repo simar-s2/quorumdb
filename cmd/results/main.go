@@ -24,8 +24,8 @@ type environment struct {
 }
 
 var environments = []environment{
-	{directory: "local", benchmarkTitle: "Local: Docker Compose on one laptop", chaosTitle: "Local: 3 processes on one laptop"},
-	{directory: "gke", benchmarkTitle: "GKE: one node per zone, client on the tools node", chaosTitle: "GKE: 3 zones"},
+	{directory: "local", benchmarkTitle: "On my laptop", chaosTitle: "On my laptop"},
+	{directory: "gke", benchmarkTitle: "On Google Cloud (three data centers)", chaosTitle: "On Google Cloud (three data centers)"},
 }
 
 // The README section between these lines is replaced by the generated tables.
@@ -54,7 +54,7 @@ func main() {
 
 func buildTables(directory string) (string, error) {
 	var out strings.Builder
-	out.WriteString("### Benchmarks\n\n")
+	out.WriteString("### Speed test\n\n")
 	for _, env := range environments {
 		var benchmark results.Benchmark
 		found, err := load(filepath.Join(directory, env.directory, "benchmark.json"), &benchmark)
@@ -63,13 +63,13 @@ func buildTables(directory string) (string, error) {
 		}
 		fmt.Fprintf(&out, "#### %s\n\n", env.benchmarkTitle)
 		if !found {
-			fmt.Fprintf(&out, "Not run yet. `make %s` writes `results/%s/benchmark.json`.\n\n", map[string]string{"local": "bench", "gke": "gke-bench"}[env.directory], env.directory)
+			fmt.Fprintf(&out, "Not run yet. `make %s` saves the results to `results/%s/benchmark.json`.\n\n", map[string]string{"local": "bench", "gke": "gke-bench"}[env.directory], env.directory)
 			continue
 		}
 		writeBenchmarkTable(&out, benchmark)
 	}
 
-	out.WriteString("### Chaos tests\n\n")
+	out.WriteString("### Chaos test\n\n")
 	var chaosByEnvironment []*results.Chaos
 	for _, env := range environments {
 		var chaos results.Chaos
@@ -117,7 +117,7 @@ var benchmarkRows = []benchmarkRow{
 }
 
 func writeBenchmarkTable(out *strings.Builder, benchmark results.Benchmark) {
-	out.WriteString("| Target | Pipelining | Command | Requests/s | p50 latency | p99 latency |\n")
+	out.WriteString("| Sent to | Requests | Type | Requests per second | Typical time | Slow time (1 in 100) |\n")
 	out.WriteString("|---|---|---|---:|---:|---:|\n")
 	for _, row := range benchmarkRows {
 		var requestsPerSecond, p50, p99 []float64
@@ -133,24 +133,25 @@ func writeBenchmarkTable(out *strings.Builder, benchmark results.Benchmark) {
 		}
 		target := "Leader"
 		if row.target == "follower" {
-			target = "Follower (forwards to the leader)"
+			target = "Follower (passes it to the leader)"
 		}
-		pipelining := fmt.Sprintf("%d (`-P %d`)", row.pipeline, row.pipeline)
+		requests := fmt.Sprintf("%d at a time", row.pipeline)
 		if row.pipeline == 1 {
-			pipelining = "none (`-P 1`)"
+			requests = "one at a time"
 		}
-		fmt.Fprintf(out, "| %s | %s | %s | %s | %.2f ms | %s ms |\n", target, pipelining, row.test,
+		kind := map[string]string{"SET": "Save (`SET`)", "GET": "Read (`GET`)"}[row.test]
+		fmt.Fprintf(out, "| %s | %s | %s | %s | %.2f ms | %s ms |\n", target, requests, kind,
 			withRange(requestsPerSecond, formatCount), results.Median(p50), withRange(p99, formatMilliseconds))
 	}
 	out.WriteString("\n")
 
 	s := benchmark.Settings
-	repeats := fmt.Sprintf("Median of %d runs, range in brackets.", s.Repeats)
+	repeats := fmt.Sprintf("Each number is the middle result of %d runs, with the lowest and highest in brackets.", s.Repeats)
 	if s.Repeats == 1 {
-		repeats = "One run per row."
+		repeats = "Each number is from one run."
 	}
-	fmt.Fprintf(out, "%s `%s`, %s requests per run, %d connections, %s random keys, %d-byte values.\n",
-		repeats, s.RedisBenchmarkVersion, formatCount(float64(s.Requests)), s.Clients, formatCount(float64(s.Keyspace)), s.ValueBytes)
+	fmt.Fprintf(out, "%s Each run sent %s requests from %d connections at once, using `%s`.\n",
+		repeats, formatCount(float64(s.Requests)), s.Clients, s.RedisBenchmarkVersion)
 	if benchmark.Description != "" {
 		fmt.Fprintf(out, "Where: %s.\n", strings.TrimSuffix(benchmark.Description, "."))
 	}
@@ -163,7 +164,7 @@ func writeBenchmarkTable(out *strings.Builder, benchmark results.Benchmark) {
 			leaderChanges++
 		}
 	}
-	fmt.Fprintf(out, "Measured %s; the leader changed during %d of %d runs. Raw data: `results/%s/benchmark.json`.\n\n",
+	fmt.Fprintf(out, "Measured on %s. The leader changed during %d of %d runs. Raw data: `results/%s/benchmark.json`.\n\n",
 		benchmark.StartedAt.Format("2006-01-02"), leaderChanges, len(benchmark.Runs), benchmark.Environment)
 }
 
@@ -182,7 +183,8 @@ func describePlacement(benchmark results.Benchmark) string {
 	for _, run := range benchmark.Runs {
 		targets[run.Target] = run.Node
 	}
-	return fmt.Sprintf("Nodes: one %s per zone. Client: the tools node (%s) in %s. Leader: %s in %s. Follower: %s in %s.",
+	return fmt.Sprintf("Each node is a %s computer in its own data center. The test ran from a separate %s computer in %s. "+
+		"The leader was %s in %s, and the follower was %s in %s.",
 		machineType, benchmark.Client.MachineType, benchmark.Client.Zone,
 		targets["leader"], zoneOf[targets["leader"]], targets["follower"], zoneOf[targets["follower"]])
 }
@@ -237,72 +239,97 @@ func writeChaosTable(out *strings.Builder, chaos []*results.Chaos) {
 	}
 	count := func(n int) string { return formatCount(float64(n)) }
 
-	row("Runs passed", func(c *results.Chaos) string { return fmt.Sprintf("**%d / %d**", c.Passed, c.Runs) })
-	row("Linearizability violations (porcupine)", func(c *results.Chaos) string { return fmt.Sprintf("**%d**", c.LinearizabilityViolations) })
-	row("Lost acknowledged writes, checked one by one", func(c *results.Chaos) string {
-		return fmt.Sprintf("**%s** of %s", count(c.LostConfirmedWrites), count(c.ConfirmedWritesChecked))
+	row("Runs where every check passed", func(c *results.Chaos) string { return fmt.Sprintf("**%d / %d**", c.Passed, c.Runs) })
+	row("Wrong answers found by the checker", func(c *results.Chaos) string { return fmt.Sprintf("**%d**", c.LinearizabilityViolations) })
+	row("Saves that got \"OK\" but were lost", func(c *results.Chaos) string {
+		return fmt.Sprintf("**%s** of %s checked", count(c.LostConfirmedWrites), count(c.ConfirmedWritesChecked))
 	})
-	row("Acknowledged writes", func(c *results.Chaos) string { return count(c.AcknowledgedWrites) })
-	row("Writes with an unknown outcome (timed out during a fault)", func(c *results.Chaos) string { return count(c.AmbiguousWrites) })
+	row("Saves that got \"OK\"", func(c *results.Chaos) string { return count(c.AcknowledgedWrites) })
+	row("Saves with no answer, because a problem hit mid-request (allowed either way)", func(c *results.Chaos) string { return count(c.AmbiguousWrites) })
 	row("Reads checked", func(c *results.Chaos) string { return count(c.SuccessfulReads) })
-	row("Runs where all replicas converged", func(c *results.Chaos) string {
+	row("Runs where all three nodes ended with the same data", func(c *results.Chaos) string {
 		checked := c.Runs - c.SetupFailures
 		return fmt.Sprintf("%d / %d", checked-c.NotConverged, checked)
 	})
-	row("Faults injected", func(c *results.Chaos) string {
+	row("Problems caused on purpose", func(c *results.Chaos) string {
 		var kinds []string
-		for _, kind := range sortedKeys(c.Faults) {
-			kinds = append(kinds, fmt.Sprintf("%d %s", c.Faults[kind], kind))
+		for _, kind := range []string{"kill", "pause", "isolate", "leader-zone", "bridge", "one-way"} {
+			if c.Faults[kind] > 0 {
+				kinds = append(kinds, fmt.Sprintf("%d %s", c.Faults[kind], faultNames[kind]))
+			}
 		}
 		return fmt.Sprintf("%s: %s", count(c.TotalFaults), strings.Join(kinds, ", "))
 	})
 	for _, kind := range []string{"kill", "pause", "isolate", "leader-zone"} {
 		label := map[string]string{
-			"kill":        "Leader failover after a kill -9: median (max)",
-			"pause":       "Leader failover after a freeze (SIGSTOP): median (max)",
-			"isolate":     "Leader failover after isolating the leader: median (max)",
-			"leader-zone": "Leader failover after cutting off the leader's zone: median (max)",
+			"kill":        "Time to pick a new leader after the leader crashed",
+			"pause":       "Time to pick a new leader after the leader froze",
+			"isolate":     "Time to pick a new leader after the leader was cut off",
+			"leader-zone": "Time to pick a new leader after the leader's data center was cut off",
 		}[kind]
 		row(label, func(c *results.Chaos) string {
 			samples := c.FailoverMilliseconds[kind]
 			if len(samples) == 0 {
-				return fmt.Sprintf("none timed (%d with no new leader in 10 s)", c.FailoverTimeouts[kind])
+				return fmt.Sprintf("not measured (%d times no new leader within 10 s)", c.FailoverTimeouts[kind])
 			}
-			text := fmt.Sprintf("%.0f ms (%.0f ms), %d timed", results.Median(samples), slices.Max(samples), len(samples))
+			text := fmt.Sprintf("%s ms typical, %s ms slowest (%d times)", formatCount(results.Median(samples)), formatCount(slices.Max(samples)), len(samples))
 			if timeouts := c.FailoverTimeouts[kind]; timeouts > 0 {
-				text += fmt.Sprintf(", **%d with no new leader in 10 s**", timeouts)
+				text += fmt.Sprintf(", **%d times no new leader within 10 s**", timeouts)
 			}
 			return text
 		})
 	}
-	row("Fault time per run, wall time", func(c *results.Chaos) string {
-		return fmt.Sprintf("%.0f s, %.0f min total", c.Settings.FaultSecondsPerRun, c.WallSeconds/60)
+	row("Time spent breaking things", func(c *results.Chaos) string {
+		return fmt.Sprintf("%.0f s per run, %.0f min in total", c.Settings.FaultSecondsPerRun, c.WallSeconds/60)
 	})
-	row("Measured", func(c *results.Chaos) string {
-		where := c.Client.OS
+	row("Measured on", func(c *results.Chaos) string {
+		where := fmt.Sprintf("%s with %d CPUs", plainOS(c.Client.OS), c.Client.CPUs)
 		if len(c.Nodes) > 0 {
 			var zones []string
 			for _, node := range c.Nodes {
 				zones = append(zones, node.Zone)
 			}
-			where = fmt.Sprintf("%s nodes in %s", c.Nodes[0].MachineType, strings.Join(zones, ", "))
+			where = fmt.Sprintf("%s computers in %s", c.Nodes[0].MachineType, strings.Join(zones, ", "))
 		}
 		return fmt.Sprintf("%s, %s", c.StartedAt.Format("2006-01-02"), where)
 	})
-	out.WriteString("\nRaw data: `results/local/chaos.json` and `results/gke/chaos.json`, with every run's numbers and each failover time. Failover times run from just before the fault command was sent until another node answered as leader; on GKE they include `kubectl` and NetworkPolicy latency, so they are upper bounds.\n")
+	out.WriteString("\n\"Time to pick a new leader\" runs from the moment the problem was caused until another node answered as the new leader. " +
+		"It is only measured when nothing else was broken at the same time. On Google Cloud it also includes the time Kubernetes takes to apply the problem, " +
+		"so the real times are a little shorter. Raw data, with every run and every time: `results/local/chaos.json` and `results/gke/chaos.json`.\n")
+}
+
+// plainOS turns Go's operating system name, like darwin/arm64, into plain words.
+func plainOS(os string) string {
+	switch os {
+	case "darwin/arm64":
+		return "a Mac with Apple Silicon"
+	case "darwin/amd64":
+		return "an Intel Mac"
+	}
+	return "a " + os + " computer"
+}
+
+// faultNames describes each kind of fault in plain words.
+var faultNames = map[string]string{
+	"kill":        "crashes",
+	"pause":       "freezes",
+	"isolate":     "nodes cut off",
+	"leader-zone": "leader's data center cut off",
+	"bridge":      "links between two nodes cut",
+	"one-way":     "one-way cuts",
 }
 
 // negativeControls are the deliberately broken builds of make chaos-negative, which the checks
 // must catch. They only run locally, because they need extra flags on the node processes.
 var negativeControls = []struct{ flag, file, meaning string }{
-	{"-unsafe-local-reads", "chaos-unsafe-local-reads.json", "reads skip ReadIndex and use local state"},
-	{"-unsafe-early-ack", "chaos-unsafe-early-ack.json", "SET is acknowledged before it commits"},
+	{"-unsafe-local-reads", "chaos-unsafe-local-reads.json", "answers reads without checking it is still the leader"},
+	{"-unsafe-early-ack", "chaos-unsafe-early-ack.json", "says OK before a save is on two nodes"},
 }
 
 func writeNegativeControls(out *strings.Builder, directory string) error {
-	out.WriteString("\n#### Does the checker catch real bugs?\n\n")
-	out.WriteString("The same harness against deliberately broken builds (`make chaos-negative`, local only). Every run should fail.\n\n")
-	out.WriteString("| Broken build | Runs | Runs porcupine flagged as not linearizable | Lost acknowledged writes, checked one by one |\n")
+	out.WriteString("\n#### Does the test catch real bugs?\n\n")
+	out.WriteString("The same chaos test, on my laptop, against two versions I broke on purpose (`make chaos-negative`). Every run should fail.\n\n")
+	out.WriteString("| Broken version | Runs | Runs where the checker found wrong answers | Saves that got \"OK\" but were lost |\n")
 	out.WriteString("|---|---:|---:|---:|\n")
 	for _, control := range negativeControls {
 		var chaos results.Chaos
@@ -311,10 +338,10 @@ func writeNegativeControls(out *strings.Builder, directory string) error {
 			return err
 		}
 		if !found {
-			fmt.Fprintf(out, "| `%s` (%s) | not run yet | | |\n", control.flag, control.meaning)
+			fmt.Fprintf(out, "| `%s`: %s | not run yet | | |\n", control.flag, control.meaning)
 			continue
 		}
-		fmt.Fprintf(out, "| `%s` (%s) | %d | %d | %s of %s |\n", control.flag, control.meaning, chaos.Runs,
+		fmt.Fprintf(out, "| `%s`: %s | %d | %d | %s of %s checked |\n", control.flag, control.meaning, chaos.Runs,
 			chaos.LinearizabilityViolations, formatCount(float64(chaos.LostConfirmedWrites)), formatCount(float64(chaos.ConfirmedWritesChecked)))
 	}
 	return nil

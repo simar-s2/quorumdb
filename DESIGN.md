@@ -183,13 +183,37 @@ After each run it checks that every save that got "OK" is still there, that ever
 
 ## Running it on Google Cloud for the first time
 
-1. **Log in:** `gcloud auth login`, `gcloud auth application-default login`, `gcloud config set project YOUR_PROJECT`, and `gcloud components install gke-gcloud-auth-plugin`.
-2. **Make the bucket for Terraform's records (once):** `make gke-state-bucket`.
-3. **Build and deploy:** `make up`. Terraform shows its plan and asks before creating anything; from here on, it costs money. `make gke-status` should show one node per zone, one leader and two followers.
-4. **Check that the network cuts work:** `make gke-chaos RUNS=5`. In the summary, the `leader failover, leader-zone` and `leader failover, isolate` lines should show measured times, and few or no cases of `no new leader within 10s`. If most of them show no new leader, stop: the network results wouldn't mean anything.
-5. **The full chaos test:** `make gke-chaos`, 100 runs, saved to `results/gke/chaos.json`. If a run fails, the job prints a command to copy its details, and keeps them for an hour.
-6. **The speed test:** `make gke-bench`, saved to `results/gke/benchmark.json`. It first switches the database back to its normal settings.
+**Set up an account (once).**
+
+1. Sign up at [cloud.google.com/free](https://cloud.google.com/free) with a Google account. New accounts get $300 of free credit for 90 days, far more than these tests use. You need a card to sign up, but the free trial never charges it unless you upgrade to a paid account.
+2. In the [Google Cloud console](https://console.cloud.google.com), create a project (for example `quorumdb-demo`) and note its project ID.
+3. Install the tools on a Mac:
+
+   ```bash
+   brew install --cask gcloud-cli                            # Google Cloud's command line
+   brew tap hashicorp/tap && brew install hashicorp/tap/terraform
+   brew install kubernetes-cli                               # a current kubectl
+   gcloud components install gke-gcloud-auth-plugin          # lets kubectl log in to Google Cloud
+   ```
+
+4. Log in, and choose the project:
+
+   ```bash
+   gcloud auth login                                         # for gcloud and uploading images
+   gcloud auth application-default login                     # for Terraform
+   gcloud config set project YOUR_PROJECT_ID
+   gcloud auth application-default set-quota-project YOUR_PROJECT_ID
+   ```
+
+**Run the tests.** Docker must be running.
+
+1. **Make the bucket for Terraform's records (once):** `make gke-state-bucket`.
+2. **Build and deploy:** `make up`. Terraform shows its plan and asks before creating anything. From here on, it costs money. `make gke-status` should show one node per zone, one leader and two followers.
+3. **Check that the network cuts work:** `make gke-chaos RUNS=5`. In the summary, the `leader failover, leader-zone` and `leader failover, isolate` lines should show measured times, and few or no cases of `no new leader within 10s`. If most of them show no new leader, stop: the network results wouldn't mean anything.
+4. **The full chaos test:** `make gke-chaos`, 100 runs, saved to `results/gke/chaos.json`. If a run fails, the job prints a command to copy its details, and keeps them for an hour.
+5. **The speed test:** `make gke-bench`, saved to `results/gke/benchmark.json`. It first switches the database back to its normal settings.
+6. **See a failover:** `make gke-kill-leader` crashes the leader, and `make gke-status` a few seconds later shows a node in another zone leading.
 7. **Update the tables:** `make results`, then commit the JSON files with the README.
 8. **Delete everything:** `make down`, then run the three checks in [Cost and cleanup](#cost-and-cleanup).
 
-Worth taking screenshots of: `make gke-status` showing the three zones, `kubectl get pods -n quorumdb -o wide` showing each node on a different computer, the chaos job's output, and the finished results table.
+If `make up` stops with a quota error, the project is allowed fewer CPUs or IP addresses than the four computers need (8 CPUs in all). Free trial accounts can't ask for more, so either try another region with `make up REGION=us-central1`, or upgrade the account to a paid one (the free credit still applies) and request more under IAM & Admin → Quotas.

@@ -208,8 +208,11 @@ After each run it checks that every save that got "OK" is still there, that ever
 **Run the tests.** Docker must be running.
 
 1. **Make the bucket for Terraform's records (once):** `make gke-state-bucket`.
-2. **Build and deploy:** `make up`. Terraform shows its plan and asks before creating anything. From here on, it costs money. `make gke-status` should show one node per zone, one leader and two followers.
-3. **Check that the network cuts work:** `make gke-chaos RUNS=5`. In the summary, the `leader failover, leader-zone` and `leader failover, isolate` lines should show measured times, and few or no cases of `no new leader within 10s`. If most of them show no new leader, stop: the network results wouldn't mean anything.
+2. **Build and deploy:** `make up`. Terraform shows its plan and asks before creating anything. From here on, it costs money. `make gke-status` should show one node per zone, one leader and two followers:
+
+   <img src="docs/images/gke-cluster.png" width="820" alt="kubectl shows four computers in zones us-west1-a, b and c; make gke-status shows one QuorumDB node per zone, one leader and two followers.">
+
+3. **A short trial:** `make gke-chaos RUNS=5`. Before the first run, the test checks that a network cut really blocks traffic, and stops if it doesn't. In the summary, every `leader failover` line should end with `0 with no new leader within 10s`.
 4. **The full chaos test:** `make gke-chaos`, 100 runs, saved to `results/gke/chaos.json`. If a run fails, the job prints a command to copy its details, and keeps them for an hour.
 5. **The speed test:** `make gke-bench`, saved to `results/gke/benchmark.json`. It first switches the database back to its normal settings.
 6. **See a failover:** `make gke-kill-leader` crashes the leader, and `make gke-status` a few seconds later shows a node in another zone leading.

@@ -4,6 +4,8 @@ resource "google_project_service" "enabled" {
     "compute.googleapis.com",
     "container.googleapis.com",
     "artifactregistry.googleapis.com",
+    "iam.googleapis.com",                  # creates the nodes' service account
+    "cloudresourcemanager.googleapis.com", # gives that account its project role
   ])
   service            = each.value
   disable_on_destroy = false

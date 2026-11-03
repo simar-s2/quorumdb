@@ -3,6 +3,7 @@
 resource "google_service_account" "nodes" {
   account_id   = "quorumdb-nodes"
   display_name = "QuorumDB GKE nodes"
+  depends_on   = [google_project_service.enabled]
 }
 
 # GKE's minimum role for nodes: write logs and metrics.

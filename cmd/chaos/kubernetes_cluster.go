@@ -28,8 +28,16 @@ type kubernetesCluster struct {
 // chaosPolicyLabel marks the NetworkPolicies this test creates, so healing can delete them all.
 const chaosPolicyLabel = "app.kubernetes.io/managed-by=quorumdb-chaos"
 
-// connectKubernetesCluster heals anything a previous run left behind and waits until all three pods
-// are ready, so every run starts from a healthy cluster.
+// podLabel is the label this test gives each QuorumDB pod (quorumdb-chaos/pod=quorumdb-1), and the
+// one its NetworkPolicies select pods by.
+//
+// The StatefulSet's own label, statefulset.kubernetes.io/pod-name, does not work for this on GKE
+// Dataplane V2. Cilium leaves that label out when it groups pods for policy, so all three pods look the
+// same to it, and a policy that names one of them selects none: every cut silently did nothing.
+const podLabel = "quorumdb-chaos/pod"
+
+// connectKubernetesCluster heals anything a previous run left behind, waits until all three pods
+// are ready, and checks that cuts work, so every run starts from a healthy cluster.
 func connectKubernetesCluster(namespace string) (*kubernetesCluster, error) {
 	c := &kubernetesCluster{namespace: namespace}
 	for i := 0; i < nodeCount; i++ {
@@ -48,7 +56,58 @@ func connectKubernetesCluster(namespace string) (*kubernetesCluster, error) {
 			return nil, err
 		}
 	}
+	if err := c.checkCutsWork(2 * time.Minute); err != nil {
+		return nil, err
+	}
 	return c, nil
+}
+
+// checkCutsWork cuts the link from quorumdb-1 into quorumdb-0 and waits until quorumdb-1 can no longer
+// open a connection to quorumdb-0's Raft port, so the test never runs with cuts that do nothing. A pod
+// that has just been labeled can take a while to be covered by policies.
+func (c *kubernetesCluster) checkCutsWork(timeout time.Duration) error {
+	raftHost := strings.TrimSuffix(c.addresses[0], ":6379") // quorumdb-0.quorumdb-peers
+	raftAddress := raftHost + ":7000"
+	canConnect := func() bool {
+		_, err := c.exec(c.pods[1], "nc", "-z", "-w", "2", raftHost, "7000")
+		return err == nil
+	}
+	if !canConnect() {
+		return fmt.Errorf("%s cannot reach %s even before any cut", c.pods[1], raftAddress)
+	}
+	cut := []link{{from: 1, to: 0}}
+	c.setLinks(cut, netproxy.Drop)
+	defer c.setLinks(cut, netproxy.Pass)
+	deadline := time.Now().Add(timeout)
+	for canConnect() {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("a NetworkPolicy cutting %s off from %s still let it connect after %s: "+
+				"the cluster does not enforce NetworkPolicy, or not by the %s label", c.pods[1], raftAddress, timeout, podLabel)
+		}
+		time.Sleep(time.Second)
+	}
+	return nil
+}
+
+// labelPod gives a pod its podLabel.
+func (c *kubernetesCluster) labelPod(pod string) error {
+	_, err := kube.Kubectl("-n", c.namespace, "label", "pod", pod, podLabel+"="+pod, "--overwrite")
+	return err
+}
+
+// labelWhenRecreated waits until the StatefulSet controller has created a pod again (the same name
+// with a new UID) and labels it, so the cuts select the new pod like the old one. It labels the pod as
+// soon as it exists, before its container starts, so the pod joins the cluster already covered by policy.
+func (c *kubernetesCluster) labelWhenRecreated(pod, oldUID string) {
+	for deadline := time.Now().Add(5 * time.Minute); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
+		uid, err := kube.Kubectl("-n", c.namespace, "get", "pod", pod, "--ignore-not-found", "-o", "jsonpath={.metadata.uid}")
+		if uid = strings.TrimSpace(uid); err == nil && uid != "" && uid != oldUID {
+			if err := c.labelPod(pod); err != nil {
+				fmt.Fprintf(os.Stderr, "chaos: %v\n", err)
+			}
+			return
+		}
+	}
 }
 
 func (c *kubernetesCluster) nodeName(i int) string     { return c.pods[i] }
@@ -77,8 +136,13 @@ func (c *kubernetesCluster) kill(i int) (time.Time, bool) {
 	}
 	killedAt := time.Now()
 	c.exec(pod, "sh", "-c", "kill -KILL $(pidof quorumdb)")
-	// Delete in the background so the nemesis can start timing the failover right away.
-	go kube.Kubectl("-n", c.namespace, "delete", "pod", pod, "--wait=false")
+	// Delete in the background so the nemesis can start timing the failover right away, then label the
+	// pod that replaces it.
+	go func() {
+		oldUID, _ := kube.Kubectl("-n", c.namespace, "get", "pod", pod, "-o", "jsonpath={.metadata.uid}")
+		kube.Kubectl("-n", c.namespace, "delete", "pod", pod, "--wait=false")
+		c.labelWhenRecreated(pod, strings.TrimSpace(oldUID))
+	}()
 	return killedAt, true
 }
 
@@ -151,7 +215,7 @@ func policyName(receiver string) string { return "chaos-cut-into-" + receiver }
 // The Redis and health ports stay open to everyone, so the test clients can still reach a cut-off
 // node (as in the local test, where only links between nodes are cut) and the kubelet can still
 // probe it. The Raft port is open only to pods not in blockedSenders. NotIn also matches pods that
-// have no pod-name label at all, such as the test client.
+// have no podLabel at all, such as the test client.
 func receiverPolicy(namespace, receiver string, blockedSenders []string) string {
 	return fmt.Sprintf(`apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -163,7 +227,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      statefulset.kubernetes.io/pod-name: %s
+      %s: %s
   policyTypes: [Ingress]
   ingress:
   - ports:
@@ -172,12 +236,12 @@ spec:
   - from:
     - podSelector:
         matchExpressions:
-        - key: statefulset.kubernetes.io/pod-name
+        - key: %s
           operator: NotIn
           values: [%s]
     ports:
     - port: 7000
-`, policyName(receiver), namespace, receiver, strings.Join(blockedSenders, ", "))
+`, policyName(receiver), namespace, podLabel, receiver, podLabel, strings.Join(blockedSenders, ", "))
 }
 
 // healAll removes every cut, resumes frozen nodes and waits for every pod to be back and ready.
@@ -196,7 +260,16 @@ func (c *kubernetesCluster) healAndWait() error {
 	for i := 0; i < nodeCount; i++ {
 		c.setFrozen(i, false)
 	}
-	return c.waitAllReady(5 * time.Minute)
+	if err := c.waitAllReady(5 * time.Minute); err != nil {
+		return err
+	}
+	// Normally every pod already has its label; this catches one whose labelWhenRecreated gave up.
+	for _, pod := range c.pods {
+		if err := c.labelPod(pod); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // waitAllReady waits until all three pods exist, are not being deleted, and pass their readiness probe.

@@ -1,6 +1,6 @@
-# What the chaos test may do, and only in the quorumdb namespace: read and delete pods, run commands
-# in them (kill -9, kill -STOP), read their logs, read the StatefulSet's settings, and create and
-# delete NetworkPolicies to cut links between pods.
+# What the chaos test may do, and only in the quorumdb namespace: read, label and delete pods, run
+# commands in them (kill -9, kill -STOP), read their logs, read the StatefulSet's settings, and create
+# and delete NetworkPolicies to cut links between pods.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -13,7 +13,7 @@ metadata:
 rules:
 - apiGroups: [""]
   resources: [pods]
-  verbs: [get, list, delete]
+  verbs: [get, list, patch, delete]
 - apiGroups: [""]
   resources: [pods/exec]
   verbs: [create]

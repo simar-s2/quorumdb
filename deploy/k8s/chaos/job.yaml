@@ -27,6 +27,9 @@ spec:
         - -runs=100
         - -out=/tmp/chaos-results
         - -summary=-
+        # The tools node is slower than a laptop, so porcupine gets 10 minutes per run instead of 2
+        # before it gives up. A run it cannot finish checking still counts as failed.
+        - -check-timeout=10m
         # If a run fails, keep the pod (and the failed runs' histories) for an hour for kubectl cp.
         - -keep-failures-for=1h
         env:

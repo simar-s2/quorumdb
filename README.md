@@ -81,7 +81,7 @@ To run it on Google Cloud, see [the steps in DESIGN.md](DESIGN.md#running-it-on-
 
 ## 💡 Things I learned
 
-- **Check that the problem you caused really happened.** In one test setup, cutting the network didn't affect connections that were already open, so the leader never noticed. Timing how long a new leader took to appear is what revealed it.
+- **Check that the problem you caused really happened.** On Google Cloud, my network cuts silently did nothing: Google's network ignores the name tag my rules used to pick a pod. Timing how long a new leader took to appear is what revealed it.
 - **Test the old version before blaming the new one.** My speed results dropped after a change. The old version was just as slow: the laptop's Low Power Mode was on.
 - **A crash test has to be a real crash.** Asking a program to stop lets it save everything first. To test crash recovery, the test has to kill it instantly.
 

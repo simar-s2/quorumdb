@@ -57,7 +57,8 @@ while true; do
   if grep -q "^$end_marker\$" "$log"; then
     break
   fi
-  if [ -z "$(kube -n "$NAMESPACE" get job "$job" -o jsonpath='{.status.active}')" ]; then
+  # If the cluster cannot be reached (say the laptop went to sleep), keep waiting: the Job carries on.
+  if active=$(kube -n "$NAMESPACE" get job "$job" -o jsonpath='{.status.active}') && [ -z "$active" ]; then
     echo "the Job finished without printing results; its log is in $log" >&2
     exit 1
   fi
